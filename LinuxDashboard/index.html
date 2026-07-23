@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hardware Monitor</title>
+<style>
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --border: #2a2f3a;
+  --text: #e6e8ee;
+  --text-dim: #9aa1ad;
+  --accent: #4f8cff;
+  --good: #34c77b;
+  --warn: #e8b339;
+  --bad: #f0556b;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.topbar-left { display: flex; align-items: baseline; gap: 12px; }
+.topbar-left h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.hostname { color: var(--text-dim); font-size: 13px; }
+
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.last-updated { color: var(--text-dim); font-size: 12px; }
+
+.badge {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-ok { background: rgba(52,199,123,0.15); color: var(--good); }
+.badge-warn { background: rgba(232,179,57,0.15); color: var(--warn); }
+.badge-bad { background: rgba(240,85,107,0.15); color: var(--bad); }
+.badge-unknown { background: rgba(154,161,173,0.15); color: var(--text-dim); }
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.tab-btn:hover { background: var(--panel-2); color: var(--text); }
+.tab-btn.active { background: var(--accent); color: white; }
+
+main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+.card-wide { grid-column: 1 / -1; margin-bottom: 16px; }
+
+.card h2 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin: 0 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.kv-table tr td { padding: 6px 4px; border-bottom: 1px solid var(--border); }
+.kv-table tr td:first-child { color: var(--text-dim); width: 50%; }
+.kv-table tr:last-child td { border-bottom: none; }
+
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+.data-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.data-table tbody tr:hover { background: var(--panel-2); }
+.data-table tbody tr.row-bad { background: rgba(240,85,107,0.08); }
+.data-table tbody tr.row-warn { background: rgba(232,179,57,0.07); }
+.empty-note { color: var(--text-dim); font-size: 13px; padding: 8px 0; }
+
+.progress-wrap { margin-top: 14px; }
+.progress-wrap label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.progress-bar {
+  background: var(--panel-2);
+  border-radius: 6px;
+  height: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--good));
+  transition: width 0.4s ease;
+}
+.progress-fill.warn { background: var(--warn); }
+.progress-fill.bad { background: var(--bad); }
+
+.metric-value { font-size: 26px; font-weight: 700; }
+.metric-label { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+
+/* ---- Link Health additions ---- */
+.section-list { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.section-list li {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.section-list li:last-child { border-bottom: none; }
+
+details.section-details {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+details.section-details summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+details.section-details summary::-webkit-details-marker { display: none; }
+details.section-details summary::before {
+  content: "▸";
+  color: var(--accent);
+  margin-right: 8px;
+  font-size: 11px;
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+details.section-details[open] summary::before { transform: rotate(90deg); }
+details.section-details .section-body {
+  padding: 0 18px 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+details.section-details pre {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-x: auto;
+  color: #c9e6ff; 
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .topbar { flex-direction: column; align-items: flex-start; gap: 8px; }
+}
+
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <h1>Hardware Monitor</h1>
+    <span id="hostname" class="hostname">connecting...</span>
+  </div>
+  <div class="topbar-right">
+    <span id="status-badge" class="badge badge-unknown">Connecting</span>
+    <span id="last-updated" class="last-updated">--</span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="overview">Overview</button>
+  <button class="tab-btn" data-tab="cpu">CPU</button>
+  <button class="tab-btn" data-tab="memory">Memory</button>
+  <button class="tab-btn" data-tab="disk">Disk</button>
+  <button class="tab-btn" data-tab="gpu">GPU</button>
+  <button class="tab-btn" data-tab="nic">Network</button>
+  <button class="tab-btn" data-tab="io">IO Devices</button>
+  <button class="tab-btn" data-tab="linkhealth">Link Health</button>
+  <button class="tab-btn" data-tab="kernelevents">Kernel Events</button>
+</nav>
+
+<main>
+
+  <!-- OVERVIEW -->
+  <section id="tab-overview" class="tab-panel active">
+    <div class="card-grid" id="overview-cards"></div>
+  </section>
+
+  <!-- CPU -->
+  <section id="tab-cpu" class="tab-panel">
+    <div class="card-grid">
+      <div class="card">
+        <h2>CPU Inventory</h2>
+        <table class="kv-table" id="cpu-inventory-table"></table>
+      </div>
+      <div class="card">
+        <h2>CPU Metrics</h2>
+        <table class="kv-table" id="cpu-metrics-table"></table>
+        <div class="progress-wrap">
+          <label>Utilization</label>
+          <div class="progress-bar"><div id="cpu-usage-bar" class="progress-fill"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card card-wide" style="margin-top:16px;">
+      <h2>Top CPU Processes</h2>
+      <table class="data-table" id="cpu-top-processes-table">
+        <thead><tr><th>PID</th><th>Process</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Runtime</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-note" id="cpu-top-processes-empty" style="display:none;">No active CPU processes found.</p>
+    </div>
+  </section>
+
+  <!-- MEMORY -->
+  <section id="tab-memory" class="tab-panel">
+    <div class="card-grid">
+      <div class="card">
+        <h2>Memory Metrics</h2>
+        <table class="kv-table" id="memory-metrics-table"></table>
+        <div class="progress-wrap">
+          <label>RAM Usage</label>
+          <div class="progress-bar"><div id="mem-usage-bar" class="progress-fill"></div></div>
+        </div>
+        <div class="progress-wrap">
+          <label>Swap Usage</label>
+          <div class="progress-bar"><div id="swap-usage-bar" class="progress-fill"></div></div>
+        </div>
+      </div>
+      <div class="card card-wide">
+        <h2>DIMMs</h2>
+        <table class="data-table" id="memory-dimm-table">
+          <thead><tr><th>Locator</th><th>Size</th><th>Type</th><th>Speed</th><th>Manufacturer</th><th>Part #</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- DISK -->
+  <section id="tab-disk" class="tab-panel">
+    <div class="card card-wide">
+      <h2>Disk Inventory</h2>
+      <table class="data-table" id="disk-inventory-table">
+        <thead><tr><th>Device</th><th>Model</th><th>Type</th><th>Transport</th><th>Size</th><th>Vendor</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card card-wide">
+      <h2>Mounts</h2>
+      <table class="data-table" id="disk-mounts-table">
+        <thead><tr><th>Source</th><th>Mountpoint</th><th>FS</th><th>Used</th><th>Free</th><th>Usage</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card card-wide">
+      <h2>SMART Health</h2>
+      <table class="data-table" id="disk-smart-table">
+        <thead><tr><th>Device</th><th>Health</th><th>Temp (°C)</th><th>Power-On Hours</th><th>Reallocated</th><th>Pending</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- GPU -->
+  <section id="tab-gpu" class="tab-panel">
+    <div class="card-grid" id="gpu-cards"></div>
+
+    <div class="card card-wide" style="margin-top:16px;">
+      <h2>GPU Processes</h2>
+      <table class="data-table" id="gpu-top-processes-table">
+        <thead><tr><th>PID</th><th>Process</th><th>Type</th><th>GPU Compute %</th><th>GPU Memory %</th><th>GPU Memory (MB)</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-note" id="gpu-top-processes-empty" style="display:none;">No active GPU processes found.</p>
+    </div>
+  </section>
+
+  <!-- NIC -->
+  <section id="tab-nic" class="tab-panel">
+    <div class="card card-wide" style="margin-bottom:16px;">
+      <h2>NIC Health</h2>
+      <div class="metric-label">Overall Status</div>
+      <div class="metric-value" id="nic-overall-status">—</div>
+      <div class="metric-label" id="nic-overall-detail">Waiting for data</div>
+    </div>
+    <div class="card card-wide">
+      <h2>Network Interfaces</h2>
+      <table class="data-table" id="nic-table">
+        <thead><tr><th>Name</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Link</th><th>RX</th><th>TX</th><th>Errors</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- IO -->
+  <section id="tab-io" class="tab-panel">
+    <div class="card card-wide">
+      <h2>PCI Devices</h2>
+      <table class="data-table" id="pci-table">
+        <thead><tr><th>Slot</th><th>Class</th><th>Vendor</th><th>Device</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card card-wide">
+      <h2>USB Devices</h2>
+      <table class="data-table" id="usb-table">
+        <thead><tr><th>Bus</th><th>Device</th><th>Vendor ID</th><th>Device ID</th><th>Description</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- LINK HEALTH -->
+  <section id="tab-linkhealth" class="tab-panel">
+    <div class="card-grid">
+      <div class="card">
+        <h2>Overall Health</h2>
+        <div class="metric-label">Status</div>
+        <div class="metric-value" id="lh-overall-status">—</div>
+        <div class="metric-label" id="lh-score-label">Score: —</div>
+      </div>
+      <div class="card">
+        <h2>Alerts</h2>
+        <table class="kv-table" id="lh-summary-table"></table>
+      </div>
+    </div>
+
+    <div class="card card-wide" style="margin-top:16px;">
+      <h2>Critical Alerts &amp; Warnings</h2>
+      <ul class="section-list" id="lh-alert-list"></ul>
+      <p class="empty-note" id="lh-alert-empty" style="display:none;">No active alerts or warnings.</p>
+    </div>
+
+    <h2 style="font-size:14px;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-dim);margin:20px 0 12px;">Component Sections</h2>
+    <div id="lh-sections"></div>
+  </section>
+
+  <!-- KERNEL EVENTS -->
+  <section id="tab-kernelevents" class="tab-panel">
+    <div class="card card-wide">
+      <h2>Kernel Hardware Events</h2>
+      <table class="data-table" id="kernel-events-table">
+        <thead><tr><th>Timestamp</th><th>Category</th><th>Severity</th><th>Device</th><th>Message</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty-note" id="kernel-events-empty" style="display:none;">No kernel hardware events recorded.</p>
+    </div>
+  </section>
+
+</main>
+
+<script>
+const LINUX_SERVER = "http://10.16.210.13:5001";
+
+/* Hardware Monitor Dashboard - vanilla JS only */
+
+let inventoryData = null;
+let metricsData = null;
+let linkHealthData = null;
+
+// --------------------------------------------------
+// Utilities
+// --------------------------------------------------
+
+function $(sel) { return document.querySelector(sel); }
+function $all(sel) { return document.querySelectorAll(sel); }
+
+function fmt(value, unit = "") {
+  if (value === null || value === undefined || value === "") return "—";
+  return `${value}${unit}`;
+}
+
+function clearTable(tbody) {
+  while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+}
+
+function addRow(tbody, cells, rowClass) {
+  const tr = document.createElement("tr");
+  if (rowClass) tr.className = rowClass;
+  cells.forEach((c) => {
+    const td = document.createElement("td");
+    td.textContent = (c === null || c === undefined || c === "") ? "—" : c;
+    tr.appendChild(td);
+  });
+  tbody.appendChild(tr);
+}
+
+function setKvTable(table, pairs) {
+  clearTable(table);
+  pairs.forEach(([label, value]) => {
+    const tr = document.createElement("tr");
+    const tdLabel = document.createElement("td");
+    tdLabel.textContent = label;
+    const tdValue = document.createElement("td");
+    tdValue.textContent = (value === null || value === undefined || value === "") ? "—" : value;
+    tr.appendChild(tdLabel);
+    tr.appendChild(tdValue);
+    table.appendChild(tr);
+  });
+}
+
+function setProgressBar(elId, percent) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const pct = (percent === null || percent === undefined || isNaN(percent)) ? 0 : Math.max(0, Math.min(100, percent));
+  el.style.width = `${pct}%`;
+  el.classList.remove("warn", "bad");
+  if (pct >= 90) el.classList.add("bad");
+  else if (pct >= 70) el.classList.add("warn");
+}
+
+// Maps a link_health style status string ("Healthy" / "Power Saving" /
+// "Warning" / "Critical") onto the existing badge-* classes so the new
+// tabs stay visually consistent with the rest of the dashboard.
+function statusBadgeClass(status) {
+  const s = (status || "").toLowerCase();
+  if (s === "healthy") return "badge-ok";
+  if (s === "warning") return "badge-warn";
+  if (s === "critical") return "badge-bad";
+  return "badge-unknown"; // power saving / unknown / missing
+}
+
+function isEmptyValue(v) {
+  if (v === null || v === undefined) return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === "object") return Object.keys(v).length === 0;
+  return false;
+}
+
+// --------------------------------------------------
+// Tabs
+// --------------------------------------------------
+
+function initTabs() {
+  $all(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $all(".tab-btn").forEach((b) => b.classList.remove("active"));
+      $all(".tab-panel").forEach((p) => p.classList.remove("active"));
+      btn.classList.add("active");
+      $(`#tab-${btn.dataset.tab}`).classList.add("active");
+    });
+  });
+}
+
+// --------------------------------------------------
+// Status badge
+// --------------------------------------------------
+
+function setStatus(state, label) {
+  const badge = $("#status-badge");
+  badge.className = `badge badge-${state}`;
+  badge.textContent = label;
+}
+
+// --------------------------------------------------
+// Renderers
+// --------------------------------------------------
+
+function renderOverview() {
+  const container = $("#overview-cards");
+  clearTable(container);
+  container.innerHTML = "";
+
+  const sys = (inventoryData && inventoryData.system) || {};
+  const cpuMetrics = (metricsData && metricsData.cpu) || {};
+  const memMetrics = (metricsData && metricsData.memory) || {};
+  const diskMetrics = (metricsData && metricsData.disk && metricsData.disk.mounts) || [];
+  const overallHealth = (linkHealthData && linkHealthData.health_summary && linkHealthData.health_summary.overall_health) || null;
+
+  const cards = [
+    {
+      label: "CPU Usage",
+      value: cpuMetrics.usage_percent != null ? `${cpuMetrics.usage_percent}%` : "—",
+      sub: cpuMetrics.temperature_celsius != null ? `${cpuMetrics.temperature_celsius}°C` : "No temp sensor",
+    },
+    {
+      label: "Memory Usage",
+      value: memMetrics.usage_percent != null ? `${memMetrics.usage_percent}%` : "—",
+      sub: memMetrics.used_gb != null ? `${memMetrics.used_gb} / ${memMetrics.total_gb} GB` : "—",
+    },
+    {
+      label: "Uptime",
+      value: formatUptime((metricsData && metricsData.system && metricsData.system.uptime_seconds)),
+      sub: sys.hostname || "—",
+    },
+    {
+      label: "Disks Monitored",
+      value: diskMetrics.length || 0,
+      sub: sys.os_release || sys.os || "—",
+    },
+    {
+      label: "Link Health",
+      value: overallHealth || "—",
+      sub: linkHealthData && linkHealthData.health_summary ? `Score: ${fmt(linkHealthData.health_summary.score)}` : "Waiting for data",
+    },
+  ];
+
+  cards.forEach((c) => {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `
+      <div class="metric-label">${c.label}</div>
+      <div class="metric-value">${c.value}</div>
+      <div class="metric-label">${c.sub}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function formatUptime(seconds) {
+  if (seconds === null || seconds === undefined) return "—";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${d}d ${h}h ${m}m`;
+}
+
+function renderCpu() {
+  const inv = (inventoryData && inventoryData.cpu) || {};
+  setKvTable($("#cpu-inventory-table"), [
+    ["Vendor", inv.vendor],
+    ["Model", inv.model],
+    ["Architecture", inv.architecture],
+    ["Sockets", inv.sockets],
+    ["Physical Cores", inv.physical_cores],
+    ["Logical Processors", inv.logical_processors],
+    ["Threads / Core", inv.threads_per_core],
+    ["NUMA Nodes", inv.numa_nodes],
+    ["Max MHz", inv.max_mhz],
+    ["Min MHz", inv.min_mhz],
+    ["L1d Cache", inv.cache_l1d],
+    ["L1i Cache", inv.cache_l1i],
+    ["L2 Cache", inv.cache_l2],
+    ["L3 Cache", inv.cache_l3],
+    ["Virtualization", inv.virtualization],
+    ["Instruction Sets", (inv.instruction_sets || []).join(", ")],
+  ]);
+
+  const m = (metricsData && metricsData.cpu) || {};
+  const load = m.load_average || {};
+  setKvTable($("#cpu-metrics-table"), [
+    ["Usage", m.usage_percent != null ? `${m.usage_percent}%` : null],
+    ["Idle", m.idle_percent != null ? `${m.idle_percent}%` : null],
+    ["User", m.user_percent != null ? `${m.user_percent}%` : null],
+    ["System", m.system_percent != null ? `${m.system_percent}%` : null],
+    ["IO Wait", m.iowait_percent != null ? `${m.iowait_percent}%` : null],
+    ["Interrupts", m.interrupts],
+    ["Load Avg (1/5/15)", load["1min"] != null ? `${load["1min"]} / ${load["5min"]} / ${load["15min"]}` : null],
+    ["Current MHz", m.current_mhz],
+    ["Temperature", m.temperature_celsius != null ? `${m.temperature_celsius}°C` : null],
+  ]);
+
+  setProgressBar("cpu-usage-bar", m.usage_percent);
+
+  renderCpuTopProcesses();
+}
+
+// Populates the "Top CPU Processes" table on the CPU tab from
+// metrics.top_processes.cpu. Falls back to the empty-state note when no
+// process data is available.
+function renderCpuTopProcesses() {
+  const procs = (metricsData && metricsData.top_processes && metricsData.top_processes.cpu) || [];
+  const tbody = $("#cpu-top-processes-table tbody");
+  const emptyNote = $("#cpu-top-processes-empty");
+  clearTable(tbody);
+
+  if (!procs || procs.length === 0) {
+    emptyNote.style.display = "block";
+    return;
+  }
+  emptyNote.style.display = "none";
+
+  procs.forEach((p) => {
+    addRow(tbody, [
+      p.pid,
+      p.process,
+      p.user,
+      p.cpu_percent != null ? `${p.cpu_percent}%` : "—",
+      p.memory_percent != null ? `${p.memory_percent}%` : "—",
+      p.elapsed,
+    ]);
+  });
+}
+
+function renderMemory() {
+  const m = (metricsData && metricsData.memory) || {};
+  setKvTable($("#memory-metrics-table"), [
+    ["Total", m.total_gb != null ? `${m.total_gb} GB` : null],
+    ["Used", m.used_gb != null ? `${m.used_gb} GB` : null],
+    ["Free", m.free_gb != null ? `${m.free_gb} GB` : null],
+    ["Available", m.available_gb != null ? `${m.available_gb} GB` : null],
+    ["Buffers", m.buffers_gb != null ? `${m.buffers_gb} GB` : null],
+    ["Cached", m.cached_gb != null ? `${m.cached_gb} GB` : null],
+    ["Swap Total", m.swap_total_gb != null ? `${m.swap_total_gb} GB` : null],
+    ["Swap Used", m.swap_used_gb != null ? `${m.swap_used_gb} GB` : null],
+    ["Swap Free", m.swap_free_gb != null ? `${m.swap_free_gb} GB` : null],
+  ]);
+
+  setProgressBar("mem-usage-bar", m.usage_percent);
+  setProgressBar("swap-usage-bar", m.swap_usage_percent);
+
+  const inv = (inventoryData && inventoryData.memory) || {};
+  const tbody = $("#memory-dimm-table tbody");
+  clearTable(tbody);
+  (inv.dimms || []).forEach((d) => {
+    addRow(tbody, [d.locator, d.size, d.type, d.configured_speed || d.speed, d.manufacturer, d.part_number]);
+  });
+  if (!inv.dimms || inv.dimms.length === 0) {
+    addRow(tbody, ["No DIMM data available (requires elevated privileges)", "", "", "", "", ""]);
+  }
+}
+
+function renderDisk() {
+  const inv = (inventoryData && inventoryData.disk) || [];
+  const invBody = $("#disk-inventory-table tbody");
+  clearTable(invBody);
+  inv.forEach((d) => {
+    addRow(invBody, [d.name, d.model, d.type, d.transport, d.size, d.vendor]);
+  });
+
+  const m = (metricsData && metricsData.disk) || {};
+  const mountsBody = $("#disk-mounts-table tbody");
+  clearTable(mountsBody);
+  (m.mounts || []).forEach((d) => {
+    addRow(mountsBody, [
+      d.source, d.mountpoint, d.filesystem,
+      d.used_gb != null ? `${d.used_gb} GB` : "—",
+      d.free_gb != null ? `${d.free_gb} GB` : "—",
+      d.usage_percent != null ? `${d.usage_percent}%` : "—",
+    ]);
+  });
+
+  const smartBody = $("#disk-smart-table tbody");
+  clearTable(smartBody);
+  const smart = m.smart || {};
+  Object.keys(smart).forEach((dev) => {
+    const s = smart[dev];
+    addRow(smartBody, [dev, s.health, s.temperature_celsius, s.power_on_hours, s.reallocated_sectors, s.pending_sectors]);
+  });
+  if (Object.keys(smart).length === 0) {
+    addRow(smartBody, ["No SMART data available (requires smartctl + privileges)", "", "", "", "", ""]);
+  }
+}
+
+function renderGpu() {
+  const container = $("#gpu-cards");
+  container.innerHTML = "";
+  const gpus = (metricsData && metricsData.gpu) || (inventoryData && inventoryData.gpu);
+
+  if (!gpus || gpus.length === 0) {
+    container.innerHTML = `<div class="card card-wide"><p class="empty-note">No GPU detected on this system.</p></div>`;
+  } else {
+    gpus.forEach((g, idx) => {
+      const div = document.createElement("div");
+      div.className = "card";
+      div.innerHTML = `
+        <h2>GPU ${idx} — ${g.model || "Unknown"}</h2>
+        <table class="kv-table">
+          <tr><td>Vendor</td><td>${fmt(g.vendor)}</td></tr>
+          <tr><td>Driver Version</td><td>${fmt(g.driver_version)}</td></tr>
+          <tr><td>CUDA Version</td><td>${fmt(g.cuda_version)}</td></tr>
+          <tr><td>PCI Bus ID</td><td>${fmt(g.pci_bus_id)}</td></tr>
+          <tr><td>VRAM Total</td><td>${fmt(g.vram_total_mb, " MB")}</td></tr>
+          <tr><td>Memory Used</td><td>${fmt(g.memory_used_mb, " MB")}</td></tr>
+          <tr><td>GPU Utilization</td><td>${fmt(g.gpu_utilization_percent, "%")}</td></tr>
+          <tr><td>Memory Utilization</td><td>${fmt(g.memory_utilization_percent, "%")}</td></tr>
+          <tr><td>Power Draw</td><td>${fmt(g.power_draw_watts, " W")}</td></tr>
+          <tr><td>Power Limit</td><td>${fmt(g.power_limit_watts, " W")}</td></tr>
+          <tr><td>Temperature</td><td>${fmt(g.temperature_celsius, "°C")}</td></tr>
+          <tr><td>Fan Speed</td><td>${fmt(g.fan_speed_percent, "%")}</td></tr>
+          <tr><td>Graphics Clock</td><td>${fmt(g.graphics_clock_mhz, " MHz")}</td></tr>
+          <tr><td>Memory Clock</td><td>${fmt(g.memory_clock_mhz, " MHz")}</td></tr>
+        </table>
+      `;
+      container.appendChild(div);
+    });
+  }
+
+  renderGpuTopProcesses();
+}
+
+// Populates the "GPU Processes" table on the GPU tab from
+// metrics.top_processes.gpu. Falls back to the empty-state note when no
+// process data is available.
+function renderGpuTopProcesses() {
+  const procs = (metricsData && metricsData.top_processes && metricsData.top_processes.gpu) || [];
+  const tbody = $("#gpu-top-processes-table tbody");
+  const emptyNote = $("#gpu-top-processes-empty");
+  clearTable(tbody);
+
+  if (!procs || procs.length === 0) {
+    emptyNote.style.display = "block";
+    return;
+  }
+  emptyNote.style.display = "none";
+
+  procs.forEach((p) => {
+    addRow(tbody, [
+      p.pid,
+      p.name || p.process,
+      p.type,
+      p.gpu_compute_percent != null ? `${p.gpu_compute_percent}%` : "—",
+      p.gpu_memory_percent != null ? `${p.gpu_memory_percent}%` : "—",
+      p.gpu_memory_mb,
+    ]);
+  });
+}
+
+// --------------------------------------------------
+// NIC health (aligned with FBL React app)
+// --------------------------------------------------
+
+const VIRTUAL_IFACE_PATTERNS = [
+  /^lo$/i, /^docker/i, /^virbr/i, /^veth/i, /^br[-_]/i, /^tun/i, /^tap/i,
+  /^wg/i, /^tailscale/i, /^zt/i, /^cni/i, /^flannel/i, /^kube/i, /^calico/i,
+  /^cali/i, /^dummy/i, /^cilium/i, /^ppp/i, /^vpn/i, /^utun/i, /^nm-/i,
+];
+
+function isVirtualOrIgnoredInterface(name) {
+  if (!name) return true;
+  return VIRTUAL_IFACE_PATTERNS.some((re) => re.test(String(name)));
+}
+
+function isWifiInterface(name) {
+  return /^(wlan|wlp|wlo|wl)/i.test(name || "");
+}
+
+function isNicLinkUp(iface) {
+  return String(iface?.link_state || "").toLowerCase() === "up";
+}
+
+function filterUsablePhysicalNics(interfaces) {
+  const physical = (interfaces || []).filter((n) => n.name && !isVirtualOrIgnoredInterface(n.name));
+  return physical.filter((iface) => {
+    if (iface.enabled === false || iface.unused === true) return false;
+    const admin = String(iface.admin_state || iface.adminState || "").toLowerCase();
+    if (admin === "down" || admin === "disabled") return false;
+    if (isWifiInterface(iface.name) && !isNicLinkUp(iface)) {
+      return !physical.some((n) => n.name !== iface.name && isNicLinkUp(n));
+    }
+    return true;
+  });
+}
+
+function evaluateNicHealthDashboard(linkHealth, metrics) {
+  const allNics = metrics?.nic || [];
+  const allPhysical = allNics.filter((n) => n.name && !isVirtualOrIgnoredInterface(n.name));
+  const usable = filterUsablePhysicalNics(allNics);
+  const up = usable.filter(isNicLinkUp);
+  const down = usable.filter((n) => !isNicLinkUp(n));
+  const system = metrics?.system || {};
+  let connected = up.length > 0;
+  if (system.network_connectivity === false || system.connectivity === false) connected = false;
+  if (system.gateway_reachable === false || system.internet_reachable === false) connected = false;
+
+  const usableNames = new Set(usable.map((n) => n.name));
+  const lhArr = Array.isArray(linkHealth?.nic) ? linkHealth.nic : [];
+  const lhErrors = lhArr.some((entry) => {
+    const name = entry.name || entry.interface;
+    if (name && usableNames.size && !usableNames.has(name)) return false;
+    const h = entry.health || {};
+    return Object.keys(h).some((k) => /crc|error|drop|overrun|collision/i.test(k) && (h[k] || 0) > 0);
+  });
+  const errOnUp = up.filter((n) => (n.rx_errors || 0) + (n.tx_errors || 0) > 0);
+
+  let level = "healthy";
+  if (allPhysical.length === 0) level = "unknown";
+  else if (usable.length === 0) level = "healthy";
+  else if (up.length === 0) level = "critical";
+  else if (!connected) level = "critical";
+  else if (errOnUp.length > 0 || lhErrors) level = "warning";
+
+  let status;
+  if (allPhysical.length === 0) status = "Unknown — no physical interfaces detected";
+  else if (up.length === 0 && usable.length > 0) status = `Critical — all usable interfaces down (${down.map((n) => n.name).join(", ")})`;
+  else if (!connected && up.length > 0) status = `Critical — connectivity lost (${up.map((n) => n.name).join(", ")} up)`;
+  else if (errOnUp.length > 0) status = `Warning — errors on ${errOnUp.map((n) => n.name).join(", ")}`;
+  else if (lhErrors) status = "Warning — link health counter errors";
+  else status = `Healthy — ${up.length} active (${up.map((n) => n.name).join(", ")})`;
+
+  return { level, status };
+}
+
+function renderNic() {
+  const inv = (inventoryData && inventoryData.nic) || [];
+  const metrics = (metricsData && metricsData.nic) || [];
+  const metricsByName = {};
+  metrics.forEach((m) => { metricsByName[m.name] = m; });
+
+  const merged = inv.length > 0
+    ? inv.map((n) => ({ ...n, ...(metricsByName[n.name] || {}) }))
+    : metrics;
+  const nicHealth = evaluateNicHealthDashboard(linkHealthData, { nic: merged, system: metricsData?.system });
+
+  const statusEl = $("#nic-overall-status");
+  statusEl.textContent = nicHealth.level.charAt(0).toUpperCase() + nicHealth.level.slice(1);
+  statusEl.style.color =
+    nicHealth.level === "healthy" ? "var(--good)" :
+    nicHealth.level === "warning" ? "var(--warn)" :
+    nicHealth.level === "critical" ? "var(--bad)" : "var(--text)";
+  $("#nic-overall-detail").textContent = nicHealth.status;
+
+  const tbody = $("#nic-table tbody");
+  clearTable(tbody);
+  inv.forEach((n) => {
+    const m = metricsByName[n.name] || {};
+    const errors = (m.rx_errors || 0) + (m.tx_errors || 0);
+    const ignored = isVirtualOrIgnoredInterface(n.name) ? " (virtual)" : "";
+    addRow(tbody, [
+      n.name + ignored, n.mac, n.driver,
+      m.speed || n.negotiated_speed,
+      m.link_state,
+      m.rx_bytes != null ? `${(m.rx_bytes / (1024 ** 2)).toFixed(1)} MB` : "—",
+      m.tx_bytes != null ? `${(m.tx_bytes / (1024 ** 2)).toFixed(1)} MB` : "—",
+      errors,
+    ]);
+  });
+
+  if (inv.length === 0) {
+    metrics.forEach((m) => {
+      const errors = (m.rx_errors || 0) + (m.tx_errors || 0);
+      addRow(tbody, [
+        m.name, "—", "—", m.speed, m.link_state,
+        m.rx_bytes != null ? `${(m.rx_bytes / (1024 ** 2)).toFixed(1)} MB` : "—",
+        m.tx_bytes != null ? `${(m.tx_bytes / (1024 ** 2)).toFixed(1)} MB` : "—",
+        errors,
+      ]);
+    });
+  }
+}
+
+function renderIo() {
+  const io = (inventoryData && inventoryData.io) || { pci: [], usb: [] };
+
+  const pciBody = $("#pci-table tbody");
+  clearTable(pciBody);
+  (io.pci || []).forEach((d) => {
+    addRow(pciBody, [d.slot, d.class, d.vendor, d.device]);
+  });
+
+  const usbBody = $("#usb-table tbody");
+  clearTable(usbBody);
+  (io.usb || []).forEach((d) => {
+    addRow(usbBody, [d.bus, d.device, d.vendor_id, d.device_id, d.description]);
+  });
+}
+
+// --------------------------------------------------
+// Link Health (new tab)
+// --------------------------------------------------
+
+// Section keys shown as individual collapsible cards on the Link Health
+// tab, in display order, mapped to a friendly label.
+const LINK_HEALTH_SECTIONS = [
+  ["cpu", "CPU"],
+  ["memory", "Memory"],
+  ["pcie", "PCIe"],
+  ["gpu", "GPU"],
+  ["nvme", "NVMe"],
+  ["sata", "SATA"],
+  ["usb", "USB"],
+  ["nic", "NIC"],
+  ["motherboard", "Motherboard"],
+  ["bios", "BIOS"],
+  ["hwmon", "HWMON"],
+  ["iommu", "IOMMU"],
+];
+
+function renderLinkHealth() {
+  const lh = linkHealthData || {};
+  const summary = lh.health_summary || {};
+
+  // Overall health card
+  const statusEl = $("#lh-overall-status");
+  statusEl.textContent = summary.overall_health || "—";
+  statusEl.style.color =
+    (summary.overall_health || "").toLowerCase() === "healthy" ? "var(--good)" :
+    (summary.overall_health || "").toLowerCase() === "warning" ? "var(--warn)" :
+    (summary.overall_health || "").toLowerCase() === "critical" ? "var(--bad)" : "var(--text)";
+  $("#lh-score-label").textContent = `Score: ${fmt(summary.score)}`;
+
+  setKvTable($("#lh-summary-table"), [
+    ["Components Checked", summary.components_checked],
+    ["Components with Warnings", summary.components_with_warnings],
+    ["Components with Errors", summary.components_with_errors],
+    ["Critical Alerts", (summary.critical_alerts || []).length],
+    ["Warnings", (summary.warnings || []).length],
+    ["Informational", (summary.informational || []).length],
+  ]);
+
+  // Alert / warning list
+  const alertList = $("#lh-alert-list");
+  const alertEmpty = $("#lh-alert-empty");
+  clearTable(alertList);
+  const allMessages = [
+    ...(summary.critical_alerts || []).map((msg) => ({ msg, level: "bad" })),
+    ...(summary.warnings || []).map((msg) => ({ msg, level: "warn" })),
+    ...(summary.informational || []).map((msg) => ({ msg, level: "unknown" })),
+  ];
+  if (allMessages.length === 0) {
+    alertEmpty.style.display = "block";
+  } else {
+    alertEmpty.style.display = "none";
+    allMessages.forEach(({ msg, level }) => {
+      const li = document.createElement("li");
+      const badge = document.createElement("span");
+      badge.className = `badge badge-${level}`;
+      badge.style.marginRight = "8px";
+      badge.textContent = level === "bad" ? "Critical" : level === "warn" ? "Warning" : "Info";
+      li.appendChild(badge);
+      li.appendChild(document.createTextNode(msg));
+      alertList.appendChild(li);
+    });
+  }
+
+  // Component sections — collapsible cards with a status badge and the
+  // raw section payload, so any future backend fields show up automatically.
+  const sectionsContainer = $("#lh-sections");
+  sectionsContainer.innerHTML = "";
+  LINK_HEALTH_SECTIONS.forEach(([key, label]) => {
+    const data = lh[key];
+    const status = sectionStatus(key, lh);
+
+    const details = document.createElement("details");
+    details.className = "section-details";
+    const summaryEl = document.createElement("summary");
+    summaryEl.innerHTML = `
+      <span>${label}</span>
+      <span class="badge ${statusBadgeClass(status)}">${status}</span>
+    `;
+    details.appendChild(summaryEl);
+
+    const body = document.createElement("div");
+    body.className = "section-body";
+    if (isEmptyValue(data)) {
+      body.innerHTML = `<p class="empty-note">No data reported for this section.</p>`;
+    } else {
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(data, null, 2);
+      body.appendChild(pre);
+    }
+    details.appendChild(body);
+    sectionsContainer.appendChild(details);
+  });
+}
+
+// Lightweight status classifier per link_health section. PCIe and GPU
+// entries already carry their own status/link_status fields from the
+// backend's health engine; everything else is derived from the plainest
+// available error counters so the badge stays meaningful without
+// requiring backend changes.
+function sectionStatus(key, lh) {
+  const data = lh[key];
+  if (isEmptyValue(data)) return "Unknown";
+
+  switch (key) {
+    case "pcie": {
+      const arr = Array.isArray(data) ? data : [];
+      if (arr.some((d) => (d.health || {}).status === "Critical")) return "Critical";
+      if (arr.some((d) => (d.health || {}).status === "Warning")) return "Warning";
+      if (arr.some((d) => (d.health || {}).status === "Power Saving")) return "Power Saving";
+      return arr.length ? "Healthy" : "Unknown";
+    }
+    case "gpu": {
+      const arr = Array.isArray(data) ? data : [];
+      const statuses = arr.map((g) => (g.health || {}).link_status);
+      if (statuses.includes("Critical")) return "Critical";
+      if (statuses.includes("Warning")) return "Warning";
+      if (statuses.includes("Power Saving")) return "Power Saving";
+      return statuses.length ? "Healthy" : "Unknown";
+    }
+    case "cpu": {
+      const h = data.health || {};
+      const throttle = (h.thermal_throttling_total_core_count || 0) + (h.thermal_throttling_total_package_count || 0);
+      if ((h.fatal_errors || 0) > 0) return "Critical";
+      if ((h.corrected_errors || 0) > 0 || throttle > 0) return "Warning";
+      return "Healthy";
+    }
+    case "memory": {
+      const h = data.health || {};
+      if (h.supported === false) return "Unknown";
+      if ((h.uncorrectable_errors || 0) > 0) return "Critical";
+      if ((h.correctable_errors || 0) > 0) return "Warning";
+      return "Healthy";
+    }
+    case "nvme": {
+      const arr = Array.isArray(data) ? data : [];
+      const critical = arr.some((d) => {
+        const cw = d.critical_warning;
+        const cwBad = cw !== undefined && cw !== null && cw !== 0 && cw !== "0" && cw !== "0x00";
+        return cwBad || (d.media_errors || 0) > 0;
+      });
+      if (critical) return "Critical";
+      if (arr.some((d) => (d.percentage_used || 0) > 80)) return "Warning";
+      return arr.length ? "Healthy" : "Unknown";
+    }
+    case "sata": {
+      const arr = Array.isArray(data) ? data : [];
+      if (arr.some((d) => d.link_degraded)) return "Warning";
+      return arr.length ? "Healthy" : "Unknown";
+    }
+    case "usb": {
+      const h = data.health || {};
+      const bad = Object.values(h).some((v) => (v || 0) > 0);
+      return bad ? "Warning" : Object.keys(h).length ? "Healthy" : "Unknown";
+    }
+    case "nic": {
+      const merged = ((metricsData && metricsData.nic) || []).map((m) => ({ ...m }));
+      const evalResult = evaluateNicHealthDashboard(lh, { nic: merged, system: metricsData?.system });
+      if (evalResult.level === "critical") return "Critical";
+      if (evalResult.level === "warning") return "Warning";
+      if (evalResult.level === "unknown") return "Unknown";
+      return "Healthy";
+    }
+    case "motherboard": {
+      const crit = (data.pcie_errors && data.pcie_errors.critical_links) || 0;
+      const warn = (data.pcie_errors && data.pcie_errors.warning_links) || 0;
+      const other = (data.acpi_errors || 0) + (data.thermal_zone_errors || 0) + (data.power_faults || 0) + (data.chipset_errors || 0);
+      if (crit > 0) return "Critical";
+      if (warn > 0 || other > 0) return "Warning";
+      return "Healthy";
+    }
+    case "bios":
+      return "Healthy";
+    case "hwmon":
+      return Array.isArray(data) && data.length ? "Healthy" : "Unknown";
+    case "iommu":
+      return data.enabled ? "Healthy" : "Unknown";
+    default:
+      return "Unknown";
+  }
+}
+
+// --------------------------------------------------
+// Kernel Events (new tab)
+// --------------------------------------------------
+
+function renderKernelEvents() {
+  const events = (linkHealthData && linkHealthData.kernel_events) || {};
+  const tbody = $("#kernel-events-table tbody");
+  const emptyNote = $("#kernel-events-empty");
+  clearTable(tbody);
+
+  let all = [];
+  Object.keys(events).forEach((category) => {
+    (events[category] || []).forEach((ev) => {
+      all.push({ ...ev, category });
+    });
+  });
+
+  if (all.length === 0) {
+    emptyNote.style.display = "block";
+    return;
+  }
+  emptyNote.style.display = "none";
+
+  all.sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
+  all.slice(0, 300).forEach((ev) => {
+    const rowClass = ev.severity === "critical" ? "row-bad" : ev.severity === "warning" ? "row-warn" : "";
+    addRow(tbody, [ev.timestamp, ev.category, ev.severity, ev.device, ev.message], rowClass);
+  });
+}
+
+function renderAll() {
+  console.log("Inventory:", inventoryData);
+  console.log("Metrics:", metricsData);
+  console.log("Link Health:", linkHealthData);
+
+  renderOverview();
+  renderCpu();
+  renderMemory();
+  renderDisk();
+  renderGpu();
+  renderNic();
+  renderIo();
+  renderLinkHealth();
+  renderKernelEvents();
+
+  const sys = (inventoryData && inventoryData.system) || {};
+  $("#hostname").textContent = sys.hostname || "unknown host";
+}
+
+// --------------------------------------------------
+// Data fetching
+// --------------------------------------------------
+
+function isRemovedTelemetryText(text) {
+  const lower = String(text || "").toLowerCase();
+  return (
+    lower.includes("psu") ||
+    lower.includes("vrm") ||
+    lower.includes("power supply") ||
+    lower.includes("bmc") ||
+    lower.includes("ipmi") ||
+    lower.includes("management")
+  );
+}
+
+function stripRemovedTelemetry(data) {
+  if (!data) return data;
+  if (data.management) delete data.management;
+  if (data.psu) delete data.psu;
+  if (data.power_supply) delete data.power_supply;
+  if (data.ipmi) delete data.ipmi;
+  if (data.health_summary) {
+    if (data.health_summary.critical_alerts) {
+      data.health_summary.critical_alerts = data.health_summary.critical_alerts.filter(
+        (msg) => !isRemovedTelemetryText(msg)
+      );
+    }
+    if (data.health_summary.warnings) {
+      data.health_summary.warnings = data.health_summary.warnings.filter(
+        (msg) => !isRemovedTelemetryText(msg)
+      );
+    }
+  }
+  if (data.kernel_events) {
+    Object.keys(data.kernel_events).forEach((cat) => {
+      data.kernel_events[cat] = data.kernel_events[cat].filter(
+        (ev) => !isRemovedTelemetryText(`${ev.message || ""} ${ev.category || ""} ${ev.device || ""}`)
+      );
+    });
+  }
+  return data;
+}
+
+async function fetchInventory() {
+  try {
+    const res = await fetch(`${LINUX_SERVER}/inventory`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    inventoryData = stripRemovedTelemetry(await res.json());
+  } catch (error) {
+    console.error("Inventory fetch failed", error);
+  }
+}
+
+async function fetchMetrics() {
+  try {
+    const res = await fetch(`${LINUX_SERVER}/metrics`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    metricsData = stripRemovedTelemetry(await res.json());
+    setStatus("ok", "Connected");
+    $("#last-updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  } catch (error) {
+    console.error("Metrics fetch failed", error);
+    setStatus("bad", "Disconnected");
+  }
+}
+
+async function fetchLinkHealth() {
+  try {
+    const res = await fetch(`${LINUX_SERVER}/link_health`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    linkHealthData = stripRemovedTelemetry(await res.json());
+  } catch (error) {
+    console.error("Link health fetch failed", error);
+  }
+}
+
+async function refreshLoop() {
+  await Promise.all([
+    fetchInventory(),
+    fetchMetrics(),
+    fetchLinkHealth(),
+  ]);
+
+  renderAll();
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  initTabs();
+  setStatus("unknown", "Connecting");
+
+  await refreshLoop();
+
+  setInterval(refreshLoop, 5000);
+});
+
+</script>
+</body>
+</html>
