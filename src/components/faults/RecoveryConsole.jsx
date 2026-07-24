@@ -1,19 +1,19 @@
 /**
- * Autonomous Recovery Console — enterprise incident response UI for Active Fault Log.
+ * Autonomous Recovery Console — enterprise incident response assistant.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { hasRecoveryPlaybook } from "../../recovery/recoveryPlaybooks";
-import {
-  buildRecoveryContext,
-  executeRecovery,
-  RECOVERY_PHASES,
-} from "../../recovery/recoveryEngine";
+import { analyzeRecovery, executeApprovedRecovery } from "../../recovery/recoveryWorkflowEngine";
 import {
   getRecoveryHistory,
   subscribeRecoveryHistory,
 } from "../../recovery/recoveryHistoryService";
 import { StatusBadge } from "../ui/HardwareModule";
+import { RecoveryTimeline } from "./RecoveryTimeline";
+import { RecoveryRecommendationDialog } from "./RecoveryRecommendationDialog";
+import { RecoveryConfirmationDialog } from "./RecoveryConfirmationDialog";
+import { RECOVERY_LEVEL_LABELS } from "../../recovery/recoveryActionCatalog";
 
 const PANEL = {
   bg: "rgba(12, 18, 28, 0.95)",
@@ -33,9 +33,7 @@ function SectionHeader({ title, subtitle }) {
 }
 
 function MetricGrid({ children }) {
-  return (
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
-  );
+  return <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">{children}</div>;
 }
 
 function MetricCell({ label, value }) {
@@ -50,14 +48,6 @@ function MetricCell({ label, value }) {
       <div className="mt-1 font-mono-metrics text-sm text-[#f1f5f9]">{value || "—"}</div>
     </div>
   );
-}
-
-function PhaseIcon({ status }) {
-  if (status === "done") return <span className="text-[#22c55e]">✓</span>;
-  if (status === "running") return <span className="animate-pulse text-[#38bdf8]">⟳</span>;
-  if (status === "failed") return <span className="text-[#ef4444]">✗</span>;
-  if (status === "skipped") return <span className="text-[#64748b]">—</span>;
-  return <span className="text-[#475569]">…</span>;
 }
 
 function formatDuration(ms) {
@@ -97,55 +87,69 @@ function compareSnapshots(before, after) {
     }));
 }
 
+function levelBadgeStatus(level) {
+  if (level === 1) return "healthy";
+  if (level === 2) return "warning";
+  return "critical";
+}
+
 export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }) {
-  const [context, setContext] = useState(null);
+  const [analysisResult, setAnalysisResult] = useState(null);
   const [loading, setLoading] = useState(true);
   const [history, setHistory] = useState([]);
   const [executing, setExecuting] = useState(false);
   const [timeline, setTimeline] = useState([]);
   const [result, setResult] = useState(null);
-  const [currentStep, setCurrentStep] = useState(null);
+  const [showRecommendDialog, setShowRecommendDialog] = useState(false);
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [pendingRecommendation, setPendingRecommendation] = useState(null);
   const abortRef = useRef(null);
 
   const recoverable = hasRecoveryPlaybook(fault);
+  const analysis = analysisResult?.analysis;
 
-  const refreshContext = useCallback(async () => {
+  const refreshAnalysis = useCallback(async () => {
     if (!recoverable) {
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const ctx = await buildRecoveryContext(fault);
-      setContext(ctx);
+      const res = await analyzeRecovery(fault);
+      setAnalysisResult(res);
+      setTimeline(res.timeline || []);
     } catch {
-      setContext(null);
+      setAnalysisResult(null);
     } finally {
       setLoading(false);
     }
   }, [fault, recoverable]);
 
   useEffect(() => {
-    refreshContext();
+    refreshAnalysis();
     setHistory(getRecoveryHistory(fault.id));
     return subscribeRecoveryHistory(() => setHistory(getRecoveryHistory(fault.id)));
-  }, [fault.id, refreshContext]);
+  }, [fault.id, refreshAnalysis]);
 
-  const handleExecute = async () => {
-    if (!recoverable || !connected || executing) return;
+  const runExecution = async (recommendation, confirmed) => {
     setExecuting(true);
     setResult(null);
-    setTimeline(RECOVERY_PHASES.map((p) => ({ ...p, status: "pending" })));
+    setShowConfirmDialog(false);
+    setShowRecommendDialog(false);
 
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
-      const outcome = await executeRecovery(fault, {
-        signal: controller.signal,
-        onPhaseUpdate: setTimeline,
-        onStepUpdate: setCurrentStep,
-      });
+      const outcome = await executeApprovedRecovery(
+        fault,
+        recommendation,
+        { confirmed, level: recommendation.level },
+        {
+          signal: controller.signal,
+          onTimelineUpdate: setTimeline,
+        }
+      );
       setResult(outcome);
       setHistory(getRecoveryHistory(fault.id));
       onRecoveryComplete?.(outcome);
@@ -154,19 +158,28 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
     } finally {
       setExecuting(false);
       abortRef.current = null;
+      setPendingRecommendation(null);
     }
   };
 
-  const handleAbort = () => {
-    abortRef.current?.abort();
+  const handleRecommendationContinue = (recommendation) => {
+    setPendingRecommendation(recommendation);
+    setShowRecommendDialog(false);
+    if (recommendation.level >= 2) {
+      setShowConfirmDialog(true);
+    } else {
+      runExecution(recommendation, true);
+    }
+  };
+
+  const handleConfirmProceed = () => {
+    if (pendingRecommendation) {
+      runExecution(pendingRecommendation, true);
+    }
   };
 
   const severityStatus =
-    fault.severity === "Critical"
-      ? "critical"
-      : fault.severity === "Warning"
-        ? "warning"
-        : "healthy";
+    fault.severity === "Critical" ? "critical" : fault.severity === "Warning" ? "warning" : "healthy";
 
   const displayStatus =
     result?.success
@@ -175,26 +188,44 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         ? "Auto Recovered"
         : fault.status;
 
-  const confidence = context?.confidence || { percent: 0, label: "Not Available", factors: [] };
-  const evidence = context?.evidence?.items || [];
-  const rca = context?.rca || [];
-  const planSteps = context?.planSteps || [];
+  const confidence = analysis?.confidence || { percent: 0, label: "Not Available", factors: [] };
+  const evidence = analysis?.evidence?.items || [];
+  const rca = analysis?.rca || [];
+  const recommendations = analysis?.recommendations || [];
 
   return (
     <div className="space-y-5">
-      {/* 1. Fault Summary */}
+      <RecoveryRecommendationDialog
+        open={showRecommendDialog}
+        onClose={() => setShowRecommendDialog(false)}
+        fault={fault}
+        analysis={analysis}
+        onContinue={handleRecommendationContinue}
+      />
+      <RecoveryConfirmationDialog
+        open={showConfirmDialog}
+        recommendation={pendingRecommendation}
+        onCancel={() => {
+          setShowConfirmDialog(false);
+          setPendingRecommendation(null);
+        }}
+        onProceed={handleConfirmProceed}
+      />
+
+      {/* Fault Summary */}
       <section
         className="rounded-xl border p-4"
-        style={{ background: PANEL.bg, borderColor: PANEL.border, borderLeft: `3px solid ${fault.componentDot || "#38bdf8"}` }}
+        style={{
+          background: PANEL.bg,
+          borderColor: PANEL.border,
+          borderLeft: `3px solid ${fault.componentDot || "#38bdf8"}`,
+        }}
       >
         <SectionHeader title="Fault Summary" subtitle="Active incident record" />
         <MetricGrid>
           <MetricCell label="Component" value={fault.component} />
           <MetricCell label="Severity" value={fault.severity} />
-          <MetricCell
-            label="Detection Time"
-            value={formatTime(fault.detected)}
-          />
+          <MetricCell label="Detection Time" value={formatTime(fault.detected)} />
           <MetricCell label="Current Status" value={displayStatus} />
         </MetricGrid>
         {fault.faultDescription && (
@@ -209,21 +240,13 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         </div>
       </section>
 
-      {/* 2. Evidence Collected */}
-      <section
-        className="rounded-xl border p-4"
-        style={{ background: PANEL.bg, borderColor: PANEL.border }}
-      >
-        <SectionHeader
-          title="Evidence Collected"
-          subtitle="Live metrics from /inventory · /metrics · /link_health"
-        />
+      {/* Evidence */}
+      <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
+        <SectionHeader title="Evidence Collected" subtitle="Live metrics from /inventory · /metrics · /link_health" />
         {loading ? (
           <p className="text-sm text-[#64748b]">Collecting telemetry evidence…</p>
         ) : evidence.length === 0 ? (
-          <p className="text-sm text-[#64748b]">
-            No additional telemetry fields available for this fault.
-          </p>
+          <p className="text-sm text-[#64748b]">No additional telemetry fields available.</p>
         ) : (
           <MetricGrid>
             {evidence.map((item) => (
@@ -233,28 +256,17 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         )}
       </section>
 
-      {/* 3. Root Cause Analysis */}
-      <section
-        className="rounded-xl border p-4"
-        style={{ background: PANEL.bg, borderColor: PANEL.border }}
-      >
-        <SectionHeader
-          title="Root Cause Analysis"
-          subtitle="Evidence-based diagnosis — no inferred causes"
-        />
+      {/* RCA */}
+      <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
+        <SectionHeader title="Root Cause Analysis" subtitle="Evidence-based diagnosis" />
         {loading ? (
           <p className="text-sm text-[#64748b]">Analyzing telemetry…</p>
         ) : rca.length === 0 ? (
-          <p className="text-sm text-[#64748b]">
-            Insufficient telemetry to determine root cause. Manual investigation required.
-          </p>
+          <p className="text-sm text-[#64748b]">Insufficient telemetry for root cause analysis.</p>
         ) : (
           <ul className="space-y-2">
             {rca.map((line) => (
-              <li
-                key={line}
-                className="flex gap-2 text-sm leading-relaxed text-[#cbd5e1]"
-              >
+              <li key={line} className="flex gap-2 text-sm leading-relaxed text-[#cbd5e1]">
                 <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#38bdf8]" />
                 {line}
               </li>
@@ -263,64 +275,75 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         )}
       </section>
 
-      {/* 4. Recovery Plan */}
-      {recoverable && (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: PANEL.border }}
-        >
+      {/* Recommendations */}
+      {recoverable ? (
+        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
           <SectionHeader
-            title="Recovery Plan"
-            subtitle={context?.playbook?.label || "Telemetry-driven recovery workflow"}
+            title="Recovery Recommendations"
+            subtitle={analysis?.catalog?.label || "Intelligent recovery assistant"}
           />
-          <ol className="space-y-2">
-            {planSteps.map((step, i) => (
-              <li
-                key={step}
-                className="flex items-start gap-3 rounded-lg border px-3 py-2 text-sm text-[#e2e8f0]"
-                style={{ background: PANEL.inner, borderColor: PANEL.border }}
-              >
-                <span className="font-mono-metrics text-xs text-[#38bdf8]">{String(i + 1).padStart(2, "0")}</span>
-                {step}
-              </li>
-            ))}
-          </ol>
-          <p className="mt-3 text-xs text-[#64748b]">
-            Recovery uses telemetry monitoring and verification only — no unsupported shell commands.
+          {loading ? (
+            <p className="text-sm text-[#64748b]">Generating recommendations…</p>
+          ) : (
+            <>
+              <div className="space-y-2">
+                {recommendations.slice(0, 6).map((rec) => (
+                  <div
+                    key={rec.actionId}
+                    className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 ${
+                      rec.disabled ? "opacity-50" : ""
+                    }`}
+                    style={{ background: PANEL.inner, borderColor: PANEL.border }}
+                  >
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm text-[#e2e8f0]">{rec.label}</span>
+                        <StatusBadge
+                          status={levelBadgeStatus(rec.level)}
+                          label={`L${rec.level}`}
+                          showDot={false}
+                        />
+                      </div>
+                      <p className="mt-0.5 text-xs text-[#64748b]">{rec.reason}</p>
+                      {rec.disabledReason && (
+                        <p className="mt-0.5 text-[10px] text-[#f59e0b]">{rec.disabledReason}</p>
+                      )}
+                    </div>
+                    <span className="font-mono-metrics text-[10px] text-[#64748b]">{rec.confidence}%</span>
+                  </div>
+                ))}
+              </div>
+        {!analysis?.capabilitiesAvailable && (
+          <p className="mt-3 text-xs text-[#f59e0b]">
+            Recovery API not detected on :5000 — ensure CM.py is running with GET /recovery/capabilities.
+            Unsupported actions are shown until the backend is reachable.
           </p>
+        )}
+            </>
+          )}
         </section>
-      )}
-
-      {!recoverable && (
+      ) : (
         <section
           className="rounded-xl border p-4"
           style={{ background: PANEL.bg, borderColor: "rgba(239,68,68,0.2)" }}
         >
-          <SectionHeader title="Recovery Plan" subtitle="Manual intervention required" />
+          <SectionHeader title="Recovery Recommendations" subtitle="Manual intervention required" />
           <p className="text-sm text-[#94a3b8]">
-            No automated recovery playbook is available for this fault class. Hardware errors,
-            SMART failures, and uncorrectable ECC require operator action.
+            No automated recommendations for this fault class. Hardware errors require operator action.
           </p>
         </section>
       )}
 
-      {/* 5. Recovery Confidence */}
+      {/* Confidence */}
       {recoverable && (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: PANEL.border }}
-        >
+        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
           <SectionHeader title="Recovery Confidence" />
           <div className="flex flex-wrap items-center gap-4">
             <div
               className="relative flex h-20 w-20 items-center justify-center rounded-full border-2"
               style={{
                 borderColor:
-                  confidence.percent >= 75
-                    ? "#22c55e"
-                    : confidence.percent >= 50
-                      ? "#f59e0b"
-                      : "#64748b",
+                  confidence.percent >= 75 ? "#22c55e" : confidence.percent >= 50 ? "#f59e0b" : "#64748b",
               }}
             >
               <span className="font-mono-metrics text-xl font-bold text-[#f1f5f9]">
@@ -341,36 +364,31 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         </section>
       )}
 
-      {/* 6. Execute Recovery */}
+      {/* Recovery Workflow */}
       {recoverable && (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: PANEL.border }}
-        >
+        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
           <SectionHeader
-            title="Execute Recovery"
-            subtitle="Validate → Monitor → Verify workflow"
+            title="Recovery Workflow"
+            subtitle="Analyze → Recommend → Approve → Execute → Verify"
           />
 
           {!connected ? (
-            <p className="text-sm text-[#f59e0b]">
-              Cannot execute recovery — monitoring backend is offline.
-            </p>
+            <p className="text-sm text-[#f59e0b]">Telemetry offline — cannot run recovery workflow.</p>
           ) : (
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 className="hw-btn-primary px-4 py-2 text-sm font-semibold disabled:opacity-40"
                 disabled={executing || loading}
-                onClick={handleExecute}
+                onClick={() => setShowRecommendDialog(true)}
               >
-                {executing ? "Recovery In Progress…" : "Execute Recovery"}
+                {executing ? "Recovery In Progress…" : "Review Recovery Recommendations"}
               </button>
               {executing && (
                 <button
                   type="button"
                   className="hw-btn-filter px-4 py-2 text-sm"
-                  onClick={handleAbort}
+                  onClick={() => abortRef.current?.abort()}
                 >
                   Abort
                 </button>
@@ -378,37 +396,9 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
             </div>
           )}
 
-          {(executing || timeline.length > 0) && (
-            <div className="mt-4 space-y-2">
-              {(timeline.length ? timeline : RECOVERY_PHASES.map((p) => ({ ...p, status: "pending" }))).map(
-                (phase) => (
-                  <div
-                    key={phase.id}
-                    className="flex items-center gap-3 rounded-lg border px-3 py-2 text-sm"
-                    style={{ background: PANEL.inner, borderColor: PANEL.border }}
-                  >
-                    <PhaseIcon status={phase.status} />
-                    <span
-                      className={
-                        phase.status === "running"
-                          ? "font-medium text-[#38bdf8]"
-                          : phase.status === "done"
-                            ? "text-[#22c55e]"
-                            : phase.status === "failed"
-                              ? "text-[#ef4444]"
-                              : "text-[#94a3b8]"
-                      }
-                    >
-                      {phase.label}
-                    </span>
-                  </div>
-                )
-              )}
-              {currentStep?.step && executing && (
-                <p className="text-xs text-[#64748b]">
-                  Current: {currentStep.step.label || currentStep.step}
-                </p>
-              )}
+          {timeline.length > 0 && (
+            <div className="mt-4">
+              <RecoveryTimeline events={timeline} />
             </div>
           )}
 
@@ -416,19 +406,29 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
             <div
               className="mt-4 rounded-lg border p-4"
               style={{
-                background: result.success ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
-                borderColor: result.success ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)",
+                background: result.success
+                  ? "rgba(34,197,94,0.08)"
+                  : result.partial
+                    ? "rgba(245,158,11,0.08)"
+                    : "rgba(239,68,68,0.08)",
+                borderColor: result.success
+                  ? "rgba(34,197,94,0.3)"
+                  : result.partial
+                    ? "rgba(245,158,11,0.3)"
+                    : "rgba(239,68,68,0.3)",
               }}
             >
               <div className="flex items-center gap-2">
                 <StatusBadge
-                  status={result.success ? "healthy" : "critical"}
+                  status={result.success ? "healthy" : result.partial ? "warning" : "critical"}
                   label={
                     result.success
                       ? "Recovery Successful"
-                      : result.aborted
-                        ? "Recovery Aborted"
-                        : "Recovery Failed"
+                      : result.partial
+                        ? "Partially Improved"
+                        : result.aborted
+                          ? "Recovery Aborted"
+                          : "Recovery Failed"
                   }
                 />
                 {result.durationMs != null && (
@@ -439,57 +439,37 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
               </div>
               <p className="mt-2 text-sm text-[#cbd5e1]">{result.reason}</p>
 
-              {!result.success && (
-                <p className="mt-2 text-xs text-[#f59e0b]">
-                  Recommend manual intervention — review evidence and escalate if condition persists.
+              {result.selectedAction && (
+                <p className="mt-2 text-xs text-[#94a3b8]">
+                  Action: {result.actionsExecuted?.[0] || result.selectedAction?.label}
                 </p>
               )}
 
-              {result.actionsExecuted?.length > 0 && (
-                <div className="mt-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
-                    Actions Performed
-                  </div>
-                  <ul className="mt-1 space-y-0.5">
-                    {result.actionsExecuted.map((a) => (
-                      <li key={a} className="text-xs text-[#94a3b8]">
-                        · {a}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
               {result.before && result.after && (
-                <div className="mt-4">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
-                    Before / After Metrics
-                  </div>
-                  <div className="mt-2 overflow-x-auto">
-                    <table className="hw-table min-w-full text-xs">
-                      <thead>
-                        <tr>
-                          <th>Metric</th>
-                          <th>Before</th>
-                          <th>After</th>
+                <div className="mt-4 overflow-x-auto">
+                  <table className="hw-table min-w-full text-xs">
+                    <thead>
+                      <tr>
+                        <th>Metric</th>
+                        <th>Before</th>
+                        <th>After</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {compareSnapshots(result.before, result.after).map((row) => (
+                        <tr key={row.label}>
+                          <td>{row.label}</td>
+                          <td className="font-mono-metrics">{row.before}</td>
+                          <td
+                            className="font-mono-metrics"
+                            style={{ color: row.changed ? "#38bdf8" : undefined }}
+                          >
+                            {row.after}
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {compareSnapshots(result.before, result.after).map((row) => (
-                          <tr key={row.label}>
-                            <td>{row.label}</td>
-                            <td className="font-mono-metrics">{row.before}</td>
-                            <td
-                              className="font-mono-metrics"
-                              style={{ color: row.changed ? "#38bdf8" : undefined }}
-                            >
-                              {row.after}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>
@@ -497,11 +477,8 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         </section>
       )}
 
-      {/* 7. Recovery History */}
-      <section
-        className="rounded-xl border p-4"
-        style={{ background: PANEL.bg, borderColor: PANEL.border }}
-      >
+      {/* History */}
+      <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
         <SectionHeader title="Recovery History" subtitle="Session recovery execution log" />
         {history.length === 0 ? (
           <p className="text-sm text-[#64748b]">No recovery executions recorded for this fault.</p>
@@ -518,26 +495,31 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
                     {formatTime(rec.timestamp)}
                   </span>
                   <StatusBadge
-                    status={rec.result === "success" ? "healthy" : rec.result === "aborted" ? "warning" : "critical"}
-                    label={rec.result === "success" ? "Success" : rec.result === "aborted" ? "Aborted" : "Failed"}
+                    status={
+                      rec.result === "success"
+                        ? "healthy"
+                        : rec.result === "partial"
+                          ? "warning"
+                          : rec.result === "aborted"
+                            ? "warning"
+                            : "critical"
+                    }
+                    label={rec.result === "success" ? "Success" : rec.result === "partial" ? "Partial" : rec.result}
                     showDot={false}
                   />
                 </div>
-                <div className="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-                  <div>
-                    <span className="text-[#64748b]">Duration</span>
-                    <div className="font-mono-metrics text-[#e2e8f0]">{formatDuration(rec.durationMs)}</div>
-                  </div>
-                  <div className="col-span-2">
-                    <span className="text-[#64748b]">Verification</span>
-                    <div className="text-[#e2e8f0]">{rec.verificationOutcome || "—"}</div>
-                  </div>
-                </div>
-                {rec.actionsExecuted?.length > 0 && (
-                  <div className="mt-2">
-                    <span className="text-[10px] uppercase tracking-wide text-[#64748b]">Actions</span>
-                    <p className="text-xs text-[#94a3b8]">{rec.actionsExecuted.join(" · ")}</p>
-                  </div>
+                {rec.selectedAction && (
+                  <p className="mt-2 text-xs text-[#e2e8f0]">
+                    {rec.selectedAction.label}
+                    {rec.selectedAction.level != null &&
+                      ` · L${rec.selectedAction.level} ${RECOVERY_LEVEL_LABELS[rec.selectedAction.level]}`}
+                  </p>
+                )}
+                <p className="mt-1 text-xs text-[#64748b]">{rec.verificationOutcome || rec.reason}</p>
+                {rec.confirmationGiven != null && (
+                  <p className="mt-1 text-[10px] text-[#475569]">
+                    Confirmation: {rec.confirmationGiven ? "Yes" : "No"}
+                  </p>
                 )}
               </article>
             ))}

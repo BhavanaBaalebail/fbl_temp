@@ -5,6 +5,7 @@
  */
 
 import { buildTelemetrySnapshot } from "./linuxMetricsService";
+import { getPrimaryGpu } from "./linkHealthService";
 
 const STORAGE_KEY = "fbl_metrics_history_v1";
 const MAX_SAMPLES = 2000;
@@ -64,7 +65,7 @@ function num(value) {
 export function extractCompactSample(inventory, metrics, linkHealth, snapshot) {
   const cpu = metrics?.cpu || {};
   const mem = metrics?.memory || {};
-  const gpu = metrics?.gpu?.[0] || null;
+  const gpu = getPrimaryGpu(metrics, inventory, linkHealth);
   const nics = metrics?.nic || [];
   const mounts = metrics?.disk?.mounts || [];
   const lh = snapshot?.linkHealthSummary || {};
@@ -206,7 +207,7 @@ export function recordTelemetrySample(inventory, metrics, linkHealth) {
     os: sys.os || sys.os_release || null,
     kernel: sys.kernel || null,
     cpu_model: inventory?.cpu?.model || null,
-    gpu_model: inventory?.gpu?.[0]?.model || null,
+    gpu_model: getPrimaryGpu(metrics, inventory, linkHealth)?.model || null,
     pci_count: inventory?.io?.pci?.length ?? null,
     usb_count: inventory?.io?.usb?.length ?? null,
     updatedAt: Date.now(),

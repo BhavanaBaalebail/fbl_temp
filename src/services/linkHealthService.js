@@ -30,6 +30,190 @@ const AFFECTED_PATHS = {
   "IO Control": "IO Control → DMI/PCIe → CPU",
 };
 
+/** GPU temperature thresholds — single source for health, faults, and anomaly cards */
+const GPU_TEMP_THRESHOLDS = {
+  warningC: 40,
+  criticalC: 42,
+};
+
+const LINK_HEALTH_SCORE_PENALTY = {
+  critical: 25,
+  warning: 12,
+};
+
+function gpuTemperatureLevel(tempC) {
+  if (tempC == null) return null;
+  if (tempC >= GPU_TEMP_THRESHOLDS.criticalC) return "critical";
+  if (tempC >= GPU_TEMP_THRESHOLDS.warningC) return "warning";
+  return "healthy";
+}
+
+function coerceGpuArray(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === "object") return [value];
+  return [];
+}
+
+function pickGpuField(...sources) {
+  for (const src of sources) {
+    if (src == null) continue;
+    if (Array.isArray(src)) {
+      const found = src.find((v) => v != null);
+      if (found != null) return found;
+      continue;
+    }
+    return src;
+  }
+  return null;
+}
+
+function gpuEntriesFromPci(inventory) {
+  const pci = inventory?.io?.pci || [];
+  return pci.filter((p) =>
+    /vga|3d controller|display controller|nvidia|geforce|radeon|amd/i.test(
+      `${p.class || ""} ${p.device || ""} ${p.vendor || ""}`
+    )
+  );
+}
+
+function mergeGpuRecord(metricGpu, inventoryGpu, linkHealthGpu) {
+  const inv = inventoryGpu || {};
+  const met = metricGpu || {};
+  const lh = linkHealthGpu || {};
+  const lhH = lh.health || {};
+
+  return {
+    ...inv,
+    ...met,
+    model: pickGpuField(met.model, inv.model, lh.model),
+    vendor: pickGpuField(met.vendor, inv.vendor),
+    pci_bus_id: pickGpuField(met.pci_bus_id, inv.pci_bus_id, lh.pci_bus_id),
+    driver_version: pickGpuField(met.driver_version, inv.driver_version),
+    cuda_version: pickGpuField(met.cuda_version, inv.cuda_version),
+    temperature_celsius: pickGpuField(
+      met.temperature_celsius,
+      inv.temperature_celsius,
+      lhH.temperature_celsius
+    ),
+    gpu_utilization_percent: pickGpuField(
+      met.gpu_utilization_percent,
+      inv.gpu_utilization_percent,
+      lhH.gpu_utilization_percent
+    ),
+    memory_utilization_percent: pickGpuField(
+      met.memory_utilization_percent,
+      inv.memory_utilization_percent,
+      lhH.memory_utilization_percent
+    ),
+    memory_used_mb: pickGpuField(met.memory_used_mb, inv.memory_used_mb),
+    memory_free_mb: pickGpuField(met.memory_free_mb, inv.memory_free_mb),
+    vram_total_mb: pickGpuField(met.vram_total_mb, inv.vram_total_mb),
+    power_draw_watts: pickGpuField(met.power_draw_watts, inv.power_draw_watts, lhH.power_draw_watts),
+    power_limit_watts: pickGpuField(met.power_limit_watts, inv.power_limit_watts, lhH.power_limit_watts),
+    fan_speed_percent: pickGpuField(
+      met.fan_speed_percent,
+      inv.fan_speed_percent,
+      lhH.fan_speed_percent
+    ),
+    graphics_clock_mhz: pickGpuField(met.graphics_clock_mhz, inv.graphics_clock_mhz),
+    memory_clock_mhz: pickGpuField(met.memory_clock_mhz, inv.memory_clock_mhz),
+    link_status: lhH.link_status || null,
+  };
+}
+
+/** Align with LinuxDashboard: metrics.gpu, else inventory.gpu, plus link_health overlays */
+export function normalizeGpuList(metrics, inventory, linkHealth) {
+  const metricGpus = coerceGpuArray(metrics?.gpu);
+  const invGpus = coerceGpuArray(inventory?.gpu);
+  const lhGpus = coerceGpuArray(linkHealth?.gpu);
+  const base = metricGpus.length > 0 ? metricGpus : invGpus;
+
+  if (base.length === 0) {
+    return gpuEntriesFromPci(inventory).map((p) =>
+      mergeGpuRecord(
+        null,
+        {
+          vendor: p.vendor,
+          model: p.device || p.vendor,
+          pci_bus_id: p.slot || p.address,
+        },
+        null
+      )
+    );
+  }
+
+  return base.map((entry, idx) =>
+    mergeGpuRecord(entry, invGpus[idx] || invGpus[0], lhGpus[idx] || lhGpus[0])
+  );
+}
+
+export function getPrimaryGpu(metrics, inventory, linkHealth) {
+  const list = normalizeGpuList(metrics, inventory, linkHealth);
+  return list[0] || null;
+}
+
+function gpuHasIdentity(gpu) {
+  return Boolean(gpu && (gpu.model || gpu.vendor || gpu.pci_bus_id));
+}
+
+function abbreviateGpuModel(model) {
+  if (!model) return null;
+  const bracket = model.match(/\[([^\]]+)\]/);
+  if (bracket) {
+    return bracket[1].replace(/^GeForce\s+/i, "").trim();
+  }
+  if (model.length > 36) return `${model.slice(0, 33)}…`;
+  return model;
+}
+
+function buildGpuStatusParts(gpuM) {
+  const parts = [];
+  parts.push(
+    gpuM.gpu_utilization_percent != null && !Number.isNaN(Number(gpuM.gpu_utilization_percent))
+      ? `${gpuM.gpu_utilization_percent}% util`
+      : "— util"
+  );
+  parts.push(
+    gpuM.temperature_celsius != null && !Number.isNaN(Number(gpuM.temperature_celsius))
+      ? `${gpuM.temperature_celsius}°C`
+      : "—°C"
+  );
+
+  const shortName = abbreviateGpuModel(gpuM.model || gpuM.vendor);
+  if (shortName) parts.push(shortName);
+
+  if (gpuM.memory_utilization_percent != null) {
+    parts.push(`VRAM ${gpuM.memory_utilization_percent}%`);
+  } else if (gpuM.memory_used_mb != null && gpuM.vram_total_mb != null) {
+    parts.push(`VRAM ${gpuM.memory_used_mb}/${gpuM.vram_total_mb} MB`);
+  }
+  if (gpuM.fan_speed_percent != null) parts.push(`fan ${gpuM.fan_speed_percent}%`);
+  if (gpuM.power_draw_watts != null) {
+    parts.push(
+      gpuM.power_limit_watts != null
+        ? `${gpuM.power_draw_watts}/${gpuM.power_limit_watts}W`
+        : `${gpuM.power_draw_watts}W`
+    );
+  }
+  if (gpuM.graphics_clock_mhz != null) parts.push(`${gpuM.graphics_clock_mhz} MHz core`);
+  if (gpuM.link_status && !/^healthy$/i.test(String(gpuM.link_status))) {
+    parts.push(`PCIe ${gpuM.link_status}`);
+  }
+  return parts;
+}
+
+function formatGpuAssessmentStatus(gpuLevel, gpuM, gpuParts) {
+  if (gpuParts.length > 0) {
+    return `${statusLabel(gpuLevel)} — ${gpuParts.join(", ")}`;
+  }
+  if (gpuHasIdentity(gpuM)) {
+    const pci = gpuM.pci_bus_id ? ` · ${gpuM.pci_bus_id}` : "";
+    return `${statusLabel(gpuLevel)} — GPU detected${pci}`;
+  }
+  return `${statusLabel(gpuLevel)} — nominal`;
+}
+
 const VIRTUAL_INTERFACE_PATTERNS = [
   /^lo$/i,
   /^docker/i,
@@ -252,10 +436,13 @@ function sectionStatus(key, lh) {
     }
     case "gpu": {
       const arr = Array.isArray(data) ? data : [];
-      const statuses = arr.map((g) => (g.health || {}).link_status);
-      if (statuses.includes("Critical")) return "critical";
-      if (statuses.includes("Warning")) return "warning";
-      return statuses.length ? "healthy" : "unknown";
+      if (!arr.length) return "unknown";
+      const statuses = arr
+        .map((g) => (g.health || {}).link_status)
+        .filter(Boolean);
+      if (statuses.some((s) => /^critical$/i.test(String(s)))) return "critical";
+      if (statuses.some((s) => /^warning$/i.test(String(s)))) return "warning";
+      return "healthy";
     }
     case "cpu": {
       const h = data.health || {};
@@ -376,7 +563,7 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
   const lh = linkHealth || {};
   const cpuM = metrics?.cpu || {};
   const memM = metrics?.memory || {};
-  const gpuM = metrics?.gpu?.[0] || inventory?.gpu?.[0];
+  const gpuM = getPrimaryGpu(metrics, inventory, lh);
 
   const assessments = {};
 
@@ -429,24 +616,27 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
 
   // GPU
   let gpuLevel = sectionStatus("gpu", lh);
-  if (!gpuM) {
+  if (!gpuHasIdentity(gpuM)) {
     assessments.GPU = { level: "unknown", status: "No GPU detected" };
   } else {
-    if (gpuM.temperature_celsius >= 85) gpuLevel = worstLevel(gpuLevel, "critical");
-    else if (gpuM.temperature_celsius >= 75) gpuLevel = worstLevel(gpuLevel, "warning");
+    if (gpuLevel === "unknown") gpuLevel = "healthy";
 
-    const gpuParts = [];
-    if (gpuM.gpu_utilization_percent != null) gpuParts.push(`${gpuM.gpu_utilization_percent}% util`);
-    if (gpuM.memory_utilization_percent != null) gpuParts.push(`VRAM ${gpuM.memory_utilization_percent}%`);
-    if (gpuM.temperature_celsius != null) gpuParts.push(`${gpuM.temperature_celsius}°C`);
-    if (gpuM.power_draw_watts != null) gpuParts.push(`${gpuM.power_draw_watts}W`);
+    const gpuTempLevel = gpuTemperatureLevel(gpuM.temperature_celsius);
+    if (gpuTempLevel === "critical") gpuLevel = worstLevel(gpuLevel, "critical");
+    else if (gpuTempLevel === "warning") gpuLevel = worstLevel(gpuLevel, "warning");
+
+    const linkStatus = gpuM.link_status;
+    if (linkStatus && /^critical$/i.test(String(linkStatus))) {
+      gpuLevel = worstLevel(gpuLevel, "critical");
+    } else if (linkStatus && /^warning$/i.test(String(linkStatus))) {
+      gpuLevel = worstLevel(gpuLevel, "warning");
+    }
+
+    const gpuParts = buildGpuStatusParts(gpuM);
 
     assessments.GPU = {
       level: gpuLevel,
-      status:
-        gpuParts.length > 0
-          ? `${statusLabel(gpuLevel)} — ${gpuParts.join(", ")}`
-          : `${statusLabel(gpuLevel)} — nominal`,
+      status: formatGpuAssessmentStatus(gpuLevel, gpuM, gpuParts),
     };
   }
 
@@ -553,8 +743,8 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
   const memM = metrics?.memory || {};
   const memH = (lh.memory || {}).health || {};
   const cpuH = (lh.cpu || {}).health || {};
-  const gpuM = metrics?.gpu?.[0];
-  const gpuLh = (lh.gpu || [])[0];
+  const gpuM = getPrimaryGpu(metrics, inventory, lh);
+  const gpuLh = coerceGpuArray(lh.gpu)[0];
   const mounts = metrics?.disk?.mounts || [];
   const smart = metrics?.disk?.smart || {};
   const nvmeArr = Array.isArray(lh.nvme) ? lh.nvme : [];
@@ -755,7 +945,8 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
       );
     }
     if (gpuM.temperature_celsius != null) {
-      if (gpuM.temperature_celsius >= 85) {
+      const gpuTempLevel = gpuTemperatureLevel(gpuM.temperature_celsius);
+      if (gpuTempLevel === "critical") {
         faults.push(
           thresholdFault({
             id: "threshold-gpu-temperature",
@@ -763,11 +954,11 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
             component: "GPU",
             metricName: "Temperature",
             currentValue: `${gpuM.temperature_celsius}°C`,
-            thresholdCrossed: "≥ 85°C (Critical)",
+            thresholdCrossed: `≥ ${GPU_TEMP_THRESHOLDS.criticalC}°C (Critical)`,
             description: `GPU temperature ${gpuM.temperature_celsius}°C exceeds critical threshold.`,
           })
         );
-      } else if (gpuM.temperature_celsius >= 75) {
+      } else if (gpuTempLevel === "warning") {
         faults.push(
           thresholdFault({
             id: "threshold-gpu-temperature",
@@ -775,7 +966,7 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
             component: "GPU",
             metricName: "Temperature",
             currentValue: `${gpuM.temperature_celsius}°C`,
-            thresholdCrossed: "≥ 75°C (Warning)",
+            thresholdCrossed: `≥ ${GPU_TEMP_THRESHOLDS.warningC}°C (Warning)`,
             description: `GPU temperature ${gpuM.temperature_celsius}°C exceeds warning threshold.`,
           })
         );
@@ -1167,7 +1358,7 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
   const cpuM = metrics?.cpu || {};
   const memH = (lh.memory || {}).health || {};
   const cpuH = (lh.cpu || {}).health || {};
-  const gpuM = metrics?.gpu?.[0];
+  const gpuM = getPrimaryGpu(metrics, inventory, lh);
   const nicEval = evaluateNicHealth(lh, metrics);
   const physicalNics = nicEval.physicalNics;
   const usableNics = nicEval.usableNics;
@@ -1215,8 +1406,12 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
       rows: [
         anomalyRow(
           "Thermal throttle",
-          gpuM?.temperature_celsius >= 85 ? "critical" : gpuM?.temperature_celsius >= 75 ? "warning" : "healthy",
-          gpuM?.temperature_celsius != null ? `${gpuM.temperature_celsius}°C` : "No GPU"
+          gpuTemperatureLevel(gpuM?.temperature_celsius) || (gpuM ? "healthy" : "unknown"),
+          gpuM?.temperature_celsius != null
+            ? `${gpuM.temperature_celsius}°C`
+            : gpuM
+              ? "No temperature sensor"
+              : "No GPU"
         ),
         anomalyRow(
           "PCIe link health",
@@ -1387,9 +1582,9 @@ export function buildAnomalyStats(anomalyCards) {
 // Topology enrichment from live inventory
 // ---------------------------------------------------------------------------
 
-export function buildTopologyContext(inventory, metrics) {
+export function buildTopologyContext(inventory, metrics, linkHealth = null) {
   const cpu = inventory?.cpu || {};
-  const gpu = inventory?.gpu?.[0] || metrics?.gpu?.[0];
+  const gpu = getPrimaryGpu(metrics, inventory, linkHealth);
   const disks = inventory?.disk || [];
   const pciCount = inventory?.io?.pci?.length || 0;
 
@@ -1434,16 +1629,78 @@ export function buildTopologyContext(inventory, metrics) {
   };
 }
 
-export function getLinkHealthSummary(linkHealth) {
+/**
+ * Derive link health score from live component assessments and link_health sections.
+ * Used when backend health_summary.score does not reflect PCIe/GPU degradation.
+ */
+function computeDerivedLinkHealthSummary(linkHealth, inventory, metrics) {
+  const assessments = assessLinkHealthComponents(linkHealth, inventory, metrics);
+  const levels = Object.values(assessments)
+    .map((a) => a.level)
+    .filter((l) => l !== "unknown");
+
+  if (levels.length === 0) return null;
+
+  let score = 100;
+  levels.forEach((level) => {
+    score -= LINK_HEALTH_SCORE_PENALTY[level] || 0;
+  });
+
   const summary = linkHealth?.health_summary || {};
+  score -= (summary.critical_alerts || []).length * 5;
+  score -= (summary.warnings || []).length * 2;
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  const componentsWithErrors = levels.filter((l) => l === "critical").length;
+  const componentsWithWarnings = levels.filter((l) => l === "warning").length;
+
+  let overallHealth = "Healthy";
+  if (levels.includes("critical")) overallHealth = "Critical";
+  else if (levels.includes("warning")) overallHealth = "Warning";
+
   return {
-    overallHealth: summary.overall_health || null,
-    score: summary.score ?? null,
-    componentsChecked: summary.components_checked ?? 0,
-    componentsWithWarnings: summary.components_with_warnings ?? 0,
-    componentsWithErrors: summary.components_with_errors ?? 0,
+    score,
+    overallHealth,
+    componentsWithErrors,
+    componentsWithWarnings,
+    componentsChecked: levels.length,
+  };
+}
+
+export function getLinkHealthSummary(linkHealth, inventory = null, metrics = null) {
+  const summary = linkHealth?.health_summary || {};
+  const derived =
+    linkHealth && (inventory || metrics)
+      ? computeDerivedLinkHealthSummary(linkHealth, inventory, metrics)
+      : null;
+
+  const backendScore = summary.score ?? null;
+  const score =
+    derived?.score != null
+      ? backendScore != null
+        ? Math.min(backendScore, derived.score)
+        : derived.score
+      : backendScore;
+
+  const overallHealth =
+    derived?.overallHealth || summary.overall_health || null;
+
+  return {
+    overallHealth,
+    score,
+    componentsChecked: derived?.componentsChecked ?? summary.components_checked ?? 0,
+    componentsWithWarnings: Math.max(
+      derived?.componentsWithWarnings ?? 0,
+      summary.components_with_warnings ?? 0
+    ),
+    componentsWithErrors: Math.max(
+      derived?.componentsWithErrors ?? 0,
+      summary.components_with_errors ?? 0
+    ),
     criticalAlertCount: (summary.critical_alerts || []).length,
     warningCount: (summary.warnings || []).length,
     informationalCount: (summary.informational || []).length,
   };
 }
+
+export { GPU_TEMP_THRESHOLDS, gpuTemperatureLevel };

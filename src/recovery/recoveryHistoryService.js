@@ -36,9 +36,6 @@ export function isFaultAutoRecovered(faultId) {
   return memory.some((r) => r.faultId === faultId && r.result === "success");
 }
 
-/**
- * @param {object} record
- */
 export function recordRecoveryExecution(record) {
   memory.push({
     ...record,

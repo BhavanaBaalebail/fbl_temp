@@ -2,6 +2,8 @@
  * Evidence-based Root Cause Analysis — no invented diagnoses.
  */
 
+import { getPrimaryGpu } from "../services/linkHealthService";
+
 /**
  * @param {object} fault
  * @param {{ items: Array<{label:string,value:string}> }} evidence
@@ -14,7 +16,7 @@ export function generateRootCauseAnalysis(fault, evidence, metrics, linkHealth) 
   const items = evidence.items || [];
   const byLabel = Object.fromEntries(items.map((i) => [i.label, i.value]));
   const id = fault.id || "";
-  const gpu = metrics?.gpu?.[0];
+  const gpu = getPrimaryGpu(metrics, null, linkHealth);
   const cpu = metrics?.cpu || {};
   const mem = metrics?.memory || {};
 

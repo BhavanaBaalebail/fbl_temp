@@ -3,6 +3,8 @@
  * Uses only /inventory, /metrics, /link_health data shapes.
  */
 
+import { getPrimaryGpu } from "../services/linkHealthService";
+
 function fmt(value, suffix = "") {
   if (value === null || value === undefined) return null;
   return `${value}${suffix}`;
@@ -23,6 +25,65 @@ function topProcess(list) {
 
 /**
  * @param {object} fault
+ * @param {object} metrics
+ * @returns {object|null}
+ */
+export function getTopProcessForFault(fault, metrics) {
+  const id = fault?.id || "";
+  const component = fault?.component || "";
+  if (component === "GPU" || id.includes("gpu")) {
+    return topProcess(metrics?.top_processes?.gpu);
+  }
+  if (component === "CPU" || id.includes("cpu")) {
+    return topProcess(metrics?.top_processes?.cpu);
+  }
+  if (component === "RAM" || id.includes("ram")) {
+    return topProcess(metrics?.top_processes?.cpu);
+  }
+  return topProcess(metrics?.top_processes?.cpu) || topProcess(metrics?.top_processes?.gpu);
+}
+
+/**
+ * @param {object} fault
+ * @param {object} metrics
+ * @param {object} inventory
+ * @returns {object|null}
+ */
+export function getRecoveryTarget(fault, metrics, inventory) {
+  const id = fault?.id || "";
+  const sys = metrics?.system || {};
+  const target = { process: null, interface: null, mount: null, device: null, service: null };
+
+  target.process = getTopProcessForFault(fault, metrics);
+
+  if (fault.component === "NIC" || id.includes("nic")) {
+    const nics = metrics?.nic || [];
+    const def = sys.default_route_interface;
+    const iface = def
+      ? nics.find((n) => n.name === def)
+      : nics.find((n) => String(n.link_state || "").toLowerCase() === "up");
+    target.interface = iface?.name || nics[0]?.name || null;
+  }
+
+  if (id.startsWith("threshold-disk-capacity-")) {
+    target.mount = id.replace("threshold-disk-capacity-", "");
+  }
+
+  if (id.includes("gpu-pcie") || id.includes("io-pcie")) {
+    const gpuLh = (linkHealth?.gpu || [])[0];
+    target.device = inventory?.gpu?.[0]?.pci_slot || gpuLh?.slot || gpuLh?.pci_slot || null;
+    target.pcieSlot =
+      target.device ||
+      (linkHealth?.pcie || [])[0]?.slot ||
+      (linkHealth?.pcie || [])[0]?.device ||
+      null;
+  }
+
+  return target;
+}
+
+/**
+ * @param {object} fault
  * @param {object} inventory
  * @param {object} metrics
  * @param {object} linkHealth
@@ -33,7 +94,7 @@ export function collectEvidence(fault, inventory, metrics, linkHealth) {
   const raw = { fault, metrics, linkHealth, inventory: {} };
   const cpu = metrics?.cpu || {};
   const mem = metrics?.memory || {};
-  const gpu = metrics?.gpu?.[0] || null;
+  const gpu = getPrimaryGpu(metrics, inventory, linkHealth);
   const gpuLh = (linkHealth?.gpu || [])[0];
   const cpuH = (linkHealth?.cpu || {})?.health || {};
   const memH = (linkHealth?.memory || {})?.health || {};
@@ -218,7 +279,7 @@ export function readMetricValue(path, metrics, linkHealth, fault) {
     ? metrics
     : metrics;
   if (path.startsWith("gpu.")) {
-    cur = metrics?.gpu?.[0] || {};
+    cur = getPrimaryGpu(metrics, null, linkHealth) || {};
     parts.shift();
     parts[0] = parts[0] === "temperature_celsius" ? "temperature_celsius" : parts.join("_").replace("memory_", "memory_");
     if (path === "gpu.temperature_celsius") return cur.temperature_celsius ?? null;
@@ -231,16 +292,17 @@ export function readMetricValue(path, metrics, linkHealth, fault) {
   return null;
 }
 
-export function snapshotMetrics(metrics, linkHealth) {
+export function snapshotMetrics(metrics, linkHealth, inventory = null) {
+  const gpu = getPrimaryGpu(metrics, inventory, linkHealth);
   return {
     cpu_usage: metrics?.cpu?.usage_percent ?? null,
     cpu_temp: metrics?.cpu?.temperature_celsius ?? null,
     mem_usage: metrics?.memory?.usage_percent ?? null,
     mem_swap: metrics?.memory?.swap_usage_percent ?? null,
-    gpu_temp: metrics?.gpu?.[0]?.temperature_celsius ?? null,
-    gpu_util: metrics?.gpu?.[0]?.gpu_utilization_percent ?? null,
-    gpu_vram: metrics?.gpu?.[0]?.memory_utilization_percent ?? null,
-    gpu_power: metrics?.gpu?.[0]?.power_draw_watts ?? null,
+    gpu_temp: gpu?.temperature_celsius ?? null,
+    gpu_util: gpu?.gpu_utilization_percent ?? null,
+    gpu_vram: gpu?.memory_utilization_percent ?? null,
+    gpu_power: gpu?.power_draw_watts ?? null,
     nic_errors: (metrics?.nic || []).reduce((s, n) => s + (n.rx_errors || 0) + (n.tx_errors || 0), 0),
     nic_up: (metrics?.nic || []).filter((n) => String(n.link_state || "").toLowerCase() === "up").length,
     lh_score: linkHealth?.health_summary?.score ?? null,

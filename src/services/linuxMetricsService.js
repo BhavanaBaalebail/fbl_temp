@@ -10,10 +10,12 @@ import {
   buildAnomalyStats,
   buildTopologyContext,
   getLinkHealthSummary,
+  getPrimaryGpu,
 } from "./linkHealthService";
+import { enrichMetricsGpu } from "./gpuMetricsSupplement";
 
 const LINUX_SERVER =
-  import.meta.env.VITE_LINUX_SERVER || "http://10.16.210.13:5001";
+  import.meta.env.VITE_LINUX_SERVER || "http://10.16.210.13:5000";
 
 const REFRESH_MS = 5000;
 
@@ -46,6 +48,22 @@ function stripInventory(data) {
 function stripMetrics(data) {
   if (data?.psu) delete data.psu;
   return data;
+}
+
+function coerceGpuArray(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === "object") return [value];
+  return [];
+}
+
+/** Keep gpu as arrays so downstream [0] access and merges stay consistent */
+function normalizeTelemetryGpu(inventory, metrics, linkHealth) {
+  if (inventory) inventory.gpu = coerceGpuArray(inventory.gpu);
+  if (metrics) metrics.gpu = coerceGpuArray(metrics.gpu);
+  if (linkHealth && linkHealth.gpu != null) {
+    linkHealth.gpu = coerceGpuArray(linkHealth.gpu);
+  }
 }
 
 function stripLinkHealth(data) {
@@ -90,12 +108,21 @@ export async function fetchLinkHealth() {
   return stripLinkHealth(await res.json());
 }
 
+export async function fetchFunctionalBlocks() {
+  const res = await fetch(`${LINUX_SERVER}/functional_blocks`);
+  if (!res.ok) throw new Error(`Functional blocks HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function fetchLinuxTelemetry() {
-  const [inventory, metrics, linkHealth] = await Promise.all([
+  const [inventory, metrics, linkHealth, functionalBlocksResult] = await Promise.all([
     fetchInventory(),
     fetchMetrics(),
     fetchLinkHealth(),
+    fetchFunctionalBlocks().catch(() => null),
   ]);
+  normalizeTelemetryGpu(inventory, metrics, linkHealth);
+  enrichMetricsGpu(metrics, inventory, linkHealth, functionalBlocksResult);
   return { inventory, metrics, linkHealth };
 }
 
@@ -118,18 +145,35 @@ export function buildHealthRows(inventory, metrics, linkHealth) {
   return buildHealthRowsFromLinkHealth(linkHealth, inventory, metrics);
 }
 
-export function buildDashboardMetrics(inventory, metrics, linkHealth, healthRows) {
+export function buildDashboardMetrics(inventory, metrics, linkHealth, healthRows, faultRows = []) {
   const hostname = inventory?.system?.hostname || "unknown host";
   const cpu = metrics?.cpu || {};
   const mem = metrics?.memory || {};
   const uptimeSeconds = metrics?.system?.uptime_seconds;
-  const lhSummary = getLinkHealthSummary(linkHealth);
+  const lhSummary = getLinkHealthSummary(linkHealth, inventory, metrics);
   const load = cpu.load_average || {};
 
   const criticalCount = healthRows.filter((r) => r.level === "critical").length;
   const warningCount = healthRows.filter((r) => r.level === "warning").length;
   const healthyCount = healthRows.filter((r) => r.level === "healthy").length;
   const total = healthRows.length;
+
+  const thresholdFaultCount = faultRows.filter(
+    (f) => f.source === "threshold" && f.severity !== "Resolved"
+  ).length;
+  const summaryAlertCount = lhSummary.criticalAlertCount + lhSummary.warningCount;
+  const componentAlertCount = criticalCount + warningCount;
+  const alertTotal = Math.max(thresholdFaultCount, summaryAlertCount, componentAlertCount);
+  const alertCritical = Math.max(
+    lhSummary.criticalAlertCount,
+    criticalCount,
+    faultRows.filter((f) => f.source === "threshold" && f.severity === "Critical").length
+  );
+  const alertWarning = Math.max(
+    lhSummary.warningCount,
+    warningCount,
+    faultRows.filter((f) => f.source === "threshold" && f.severity === "Warning").length
+  );
 
   const overallHealth = lhSummary.overallHealth || "Unknown";
   const healthLevel =
@@ -140,6 +184,8 @@ export function buildDashboardMetrics(inventory, metrics, linkHealth, healthRows
         : overallHealth.toLowerCase() === "healthy"
           ? "healthy"
           : "unknown";
+
+  const gpu = getPrimaryGpu(metrics, inventory, linkHealth);
 
   return [
     {
@@ -153,20 +199,14 @@ export function buildDashboardMetrics(inventory, metrics, linkHealth, healthRows
       accent: healthColor(healthLevel),
     },
     {
-      value: String(lhSummary.criticalAlertCount + lhSummary.warningCount || criticalCount + warningCount),
-      valueColor:
-        lhSummary.criticalAlertCount + lhSummary.warningCount + criticalCount + warningCount > 0
-          ? COLORS.critical
-          : COLORS.healthy,
+      value: String(alertTotal),
+      valueColor: alertTotal > 0 ? COLORS.critical : COLORS.healthy,
       label: "Active Alerts",
       subtitle:
-        lhSummary.criticalAlertCount + criticalCount > 0 || lhSummary.warningCount + warningCount > 0
-          ? `${lhSummary.criticalAlertCount + criticalCount} Critical, ${lhSummary.warningCount + warningCount} Warning`
+        alertCritical > 0 || alertWarning > 0
+          ? `${alertCritical} Critical, ${alertWarning} Warning`
           : "All components nominal",
-      accent:
-        lhSummary.criticalAlertCount + lhSummary.warningCount > 0
-          ? COLORS.critical
-          : COLORS.healthy,
+      accent: alertTotal > 0 ? COLORS.critical : COLORS.healthy,
     },
     {
       value: `${healthyCount} / ${total}`,
@@ -180,6 +220,9 @@ export function buildDashboardMetrics(inventory, metrics, linkHealth, healthRows
       valueColor: "#4d9fff",
       label: "System Load",
       subtitle: [
+        gpu && (gpu.gpu_utilization_percent != null || gpu.temperature_celsius != null)
+          ? `GPU ${gpu.gpu_utilization_percent != null ? `${gpu.gpu_utilization_percent}%` : "—"} · ${gpu.temperature_celsius != null ? `${gpu.temperature_celsius}°C` : "—"}`
+          : null,
         mem.usage_percent != null ? `RAM ${mem.usage_percent}%` : null,
         load["1min"] != null ? `Load ${load["1min"]}/${load["5min"]}/${load["15min"]}` : null,
         `Uptime ${formatUptime(uptimeSeconds)}`,
@@ -230,17 +273,18 @@ export function buildHealthStats(healthRows) {
 export function buildTelemetrySnapshot(inventory, metrics, linkHealth) {
   const health = buildHealthRows(inventory, metrics, linkHealth);
   const anomalyCategories = buildAnomalyCategories(linkHealth, inventory, metrics);
+  const faults = buildFaultLog(linkHealth, inventory, metrics);
 
   return {
     health,
-    metrics: buildDashboardMetrics(inventory, metrics, linkHealth, health),
+    metrics: buildDashboardMetrics(inventory, metrics, linkHealth, health, faults),
     severity: buildSeverityData(health),
     stats: buildHealthStats(health),
-    faults: buildFaultLog(linkHealth, inventory, metrics),
+    faults,
     anomalyCategories,
     anomalyStats: buildAnomalyStats(anomalyCategories),
-    topologyContext: buildTopologyContext(inventory, metrics),
-    linkHealthSummary: getLinkHealthSummary(linkHealth),
+    topologyContext: buildTopologyContext(inventory, metrics, linkHealth),
+    linkHealthSummary: getLinkHealthSummary(linkHealth, inventory, metrics),
     hostname: inventory?.system?.hostname || null,
   };
 }
