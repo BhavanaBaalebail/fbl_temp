@@ -117,7 +117,7 @@ export async function analyzeRecovery(fault) {
     timeline.push(
       createTimelineEvent(
         "process_identified",
-        `Top process: ${analysis.target.process.name} (PID ${analysis.target.process.pid})`
+        "Process candidates available — review the Process Candidates table"
       )
     );
   }

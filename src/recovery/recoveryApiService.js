@@ -79,3 +79,26 @@ export async function fetchRecoveryHistory(limit = 50) {
     return [];
   }
 }
+
+/**
+ * @param {"cpu"|"gpu"} domain
+ * @param {{ minPercent?: number, limit?: number }} [options]
+ */
+export async function fetchProcessCandidates(domain, options = {}) {
+  const minPercent = options.minPercent ?? 1;
+  const limit = options.limit ?? 50;
+  const params = new URLSearchParams({
+    domain: domain || "cpu",
+    min_percent: String(minPercent),
+    limit: String(limit),
+  });
+  const res = await fetch(`${LINUX_SERVER}/recovery/process_candidates?${params}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const err = new Error(`Process candidates HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}

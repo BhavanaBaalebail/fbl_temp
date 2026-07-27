@@ -13,7 +13,9 @@ import { StatusBadge } from "../ui/HardwareModule";
 import { RecoveryTimeline } from "./RecoveryTimeline";
 import { RecoveryRecommendationDialog } from "./RecoveryRecommendationDialog";
 import { RecoveryConfirmationDialog } from "./RecoveryConfirmationDialog";
+import { RecoveryProcessCandidates } from "./RecoveryProcessCandidates";
 import { RECOVERY_LEVEL_LABELS } from "../../recovery/recoveryActionCatalog";
+import { faultShowsProcessCandidates } from "../../recovery/recoveryProcessDomain";
 
 const PANEL = {
   bg: "rgba(12, 18, 28, 0.95)",
@@ -107,6 +109,7 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
 
   const recoverable = hasRecoveryPlaybook(fault);
   const analysis = analysisResult?.analysis;
+  const capabilities = analysisResult?.capabilities;
 
   const refreshAnalysis = useCallback(async () => {
     if (!recoverable) {
@@ -255,6 +258,21 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
           </MetricGrid>
         )}
       </section>
+
+      {recoverable && faultShowsProcessCandidates(fault) && (
+        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
+          <SectionHeader
+            title="Process Candidates"
+            subtitle="Live workloads from GET /recovery/process_candidates · pause or kill per PID"
+          />
+          <RecoveryProcessCandidates
+            fault={fault}
+            connected={connected}
+            capabilities={capabilities}
+            onActionComplete={() => refreshAnalysis()}
+          />
+        </section>
+      )}
 
       {/* RCA */}
       <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>

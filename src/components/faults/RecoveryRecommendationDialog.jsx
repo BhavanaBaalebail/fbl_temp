@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { RECOVERY_LEVEL_LABELS } from "../../recovery/recoveryActionCatalog";
+import { faultShowsProcessCandidates } from "../../recovery/recoveryProcessDomain";
 import { StatusBadge } from "../ui/HardwareModule";
 
 const PANEL = {
@@ -67,17 +68,17 @@ export function RecoveryRecommendationDialog({
               )}
             </div>
           )}
-          {target?.process?.pid && (
+          {target?.interface && (
             <div className="rounded border border-[#1e293b] p-2">
-              <span className="text-[10px] font-semibold uppercase text-[#64748b]">Top Process</span>
-              <p className="text-sm text-[#e2e8f0]">{target.process.name || "unknown"}</p>
-              <p className="font-mono-metrics text-xs text-[#94a3b8]">
-                PID {target.process.pid}
-                {target.process.cpu != null && ` · ${target.process.cpu}% CPU`}
-                {target.process.gpuCompute != null && ` · ${target.process.gpuCompute}% GPU`}
-                {target.process.memory != null && ` · ${target.process.memory}% MEM`}
-              </p>
+              <span className="text-[10px] font-semibold uppercase text-[#64748b]">Network target</span>
+              <p className="text-sm text-[#e2e8f0]">{target.interface}</p>
             </div>
+          )}
+          {faultShowsProcessCandidates(fault) && (
+            <p className="text-xs leading-relaxed text-[#64748b]">
+              Choose a process in the <strong className="text-[#94a3b8]">Process Candidates</strong> table on
+              the recovery console (all workloads ≥1% usage, not just the top consumer).
+            </p>
           )}
           {analysis.rca?.[0] && (
             <div>
