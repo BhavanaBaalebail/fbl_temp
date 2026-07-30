@@ -41,6 +41,15 @@ export function isActionSupported(capabilities, backendAction) {
  * @returns {Promise<object>}
  */
 export async function executeRecoveryAction(payload) {
+  const pid = payload?.params?.pid;
+  if (payload?.action?.includes("kill") || payload?.action?.includes("terminate")) {
+    console.info("[recovery] execute force-kill request", {
+      action: payload.action,
+      pid,
+      params: payload.params,
+    });
+  }
+
   const res = await fetch(`${LINUX_SERVER}/recovery/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -59,6 +68,19 @@ export async function executeRecoveryAction(payload) {
     err.status = res.status;
     err.body = body;
     throw err;
+  }
+
+  if (payload?.action?.includes("kill") || payload?.action?.includes("terminate")) {
+    console.info("[recovery] execute force-kill response", {
+      action: payload.action,
+      pid,
+      success: body.success,
+      command: body.command,
+      returncode: body.returncode,
+      stdout: body.stdout,
+      stderr: body.stderr,
+      message: body.message,
+    });
   }
 
   return body;

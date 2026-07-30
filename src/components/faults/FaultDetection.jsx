@@ -17,8 +17,13 @@ export function FaultDetectionTab({
   linkHealthSummary = null,
   statusPillTone,
   cardStatusTone,
+  liveMetrics = null,
 }) {
   const [activeFaultModal, setActiveFaultModal] = useState(null);
+
+  const liveFaultRow = activeFaultModal
+    ? faults.faults?.find((f) => f.id === activeFaultModal.id) || activeFaultModal
+    : null;
 
   const scanLabel = lastUpdated ? lastUpdated.toLocaleTimeString() : "—";
 
@@ -78,10 +83,11 @@ export function FaultDetectionTab({
         {linkHealthSummary?.score != null && ` · Score: ${linkHealthSummary.score}`}
       </div>
 
-      {activeFaultModal && (
+      {liveFaultRow && (
         <FaultModal
-          fault={activeFaultModal}
+          fault={liveFaultRow}
           connected={connected}
+          liveMetrics={liveMetrics}
           onClose={() => setActiveFaultModal(null)}
         />
       )}

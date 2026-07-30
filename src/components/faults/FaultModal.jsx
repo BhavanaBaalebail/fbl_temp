@@ -3,6 +3,7 @@
  * Displays detailed fault information and autonomous recovery console
  */
 
+import { enrichThresholdFaultWithTelemetry } from "../../services/linkHealthService";
 import { resolvedLogEntries } from "../../data/faultData";
 import { hasRecoveryPlaybook } from "../../recovery/recoveryPlaybooks";
 import { isFaultAutoRecovered } from "../../recovery/recoveryHistoryService";
@@ -15,13 +16,18 @@ const PANEL = {
   inner: "rgba(8, 12, 18, 0.8)",
 };
 
-export function FaultModal({ fault, onClose, connected = false }) {
+export function FaultModal({ fault, onClose, connected = false, liveMetrics = null }) {
   if (!fault) return null;
 
+  const faultForView =
+    fault.source === "threshold" && liveMetrics
+      ? enrichThresholdFaultWithTelemetry(fault, liveMetrics)
+      : fault;
+
   const showRecovery =
-    fault.source === "threshold" ||
-    hasRecoveryPlaybook(fault) ||
-    (fault.status === "Active" && fault.source !== "kernel_event");
+    faultForView.source === "threshold" ||
+    hasRecoveryPlaybook(faultForView) ||
+    (faultForView.status === "Active" && faultForView.source !== "kernel_event");
 
   return (
     <div
@@ -53,28 +59,37 @@ export function FaultModal({ fault, onClose, connected = false }) {
           </button>
         </div>
 
-        {fault.source === "kernel_event" && fault.kernelEvent ? (
+        {faultForView.source === "kernel_event" && faultForView.kernelEvent ? (
           <div className="space-y-5">
-            <KernelEventDetail fault={fault} />
-            {hasRecoveryPlaybook(fault) ? (
-              <RecoveryConsole fault={fault} connected={connected} />
+            <KernelEventDetail fault={faultForView} />
+            {hasRecoveryPlaybook(faultForView) ? (
+              <RecoveryConsole fault={faultForView} connected={connected} />
+            ) : (
+              <ManualInterventionNotice />
+            )}
+          </div>
+        ) : faultForView.source === "threshold" ? (
+          <div className="space-y-5">
+            <ThresholdFaultDetail fault={faultForView} />
+            {showRecovery ? (
+              <RecoveryConsole fault={faultForView} connected={connected} />
             ) : (
               <ManualInterventionNotice />
             )}
           </div>
         ) : showRecovery ? (
-          <RecoveryConsole fault={fault} connected={connected} />
-        ) : fault.source === "link_health" || fault.source === "derived" ? (
+          <RecoveryConsole fault={faultForView} connected={connected} />
+        ) : faultForView.source === "link_health" || faultForView.source === "derived" ? (
           <div className="space-y-5">
-            <LiveTelemetrySummary fault={fault} />
-            {hasRecoveryPlaybook(fault) ? (
-              <RecoveryConsole fault={fault} connected={connected} />
+            <LiveTelemetrySummary fault={faultForView} />
+            {hasRecoveryPlaybook(faultForView) ? (
+              <RecoveryConsole fault={faultForView} connected={connected} />
             ) : (
               <ManualInterventionNotice />
             )}
           </div>
         ) : (
-          <ResolvedFaultEntry fault={fault} />
+          <ResolvedFaultEntry fault={faultForView} />
         )}
 
         <style>{`
@@ -107,6 +122,84 @@ function ManualInterventionNotice() {
         No recovery playbook is available for this fault type. Review telemetry evidence and
         perform manual remediation per your runbook.
       </p>
+    </section>
+  );
+}
+
+function ThresholdFaultDetail({ fault }) {
+  const detail = fault.telemetryDetail || {};
+  const isDiskPerf = detail.type === "disk_performance";
+  const severityBg =
+    fault.severity === "Critical"
+      ? theme.critical
+      : fault.severity === "Warning"
+        ? theme.warning
+        : theme.healthy;
+
+  const rows = isDiskPerf
+    ? [
+        ["Device", detail.device ?? "—"],
+        ["Busy %", detail.busy_percent != null ? `${detail.busy_percent}%` : "—"],
+        ["Queue depth", detail.queue_depth != null ? String(detail.queue_depth) : "—"],
+        ["Average latency", detail.average_latency_ms != null ? `${detail.average_latency_ms} ms` : "—"],
+        ["Total throughput", detail.total_MB_per_sec != null ? `${detail.total_MB_per_sec} MB/s` : "—"],
+        ["Read IOPS", detail.read_IOPS != null ? String(detail.read_IOPS) : "—"],
+        ["Write IOPS", detail.write_IOPS != null ? String(detail.write_IOPS) : "—"],
+        ["Timestamp", detail.timestamp ?? fault.detected ?? "—"],
+        ["Threshold crossed", detail.thresholdCrossed ?? fault.thresholdCrossed ?? "—"],
+        ["Status", detail.status ?? fault.status ?? "—"],
+      ]
+    : [
+        ["Metric", detail.metricName ?? fault.metricName ?? "—"],
+        ["Current value", detail.currentValue ?? fault.currentValue ?? "—"],
+        ["Threshold crossed", detail.thresholdCrossed ?? fault.thresholdCrossed ?? "—"],
+        ["Timestamp", detail.timestamp ?? fault.detected ?? "—"],
+        ["Status", detail.status ?? fault.status ?? "—"],
+      ];
+
+  return (
+    <section>
+      <h3 className="font-display text-lg font-semibold text-[#f1f5f9]">Threshold Fault — Live Metrics</h3>
+      <p className="mt-1 text-xs text-[#64748b]">
+        Sourced from live /metrics · auto-refreshed every 5s while this dialog is open
+      </p>
+      <article
+        className="mt-4 rounded-xl border p-4"
+        style={{
+          backgroundColor: PANEL.inner,
+          borderColor: PANEL.border,
+          borderLeft: `4px solid ${fault.componentDot}`,
+        }}
+      >
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full"
+                style={{ backgroundColor: fault.componentDot }}
+              />
+              <span className="text-lg font-bold text-white">{fault.metricName || fault.component}</span>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-[#d8e6ff]">{fault.faultDescription}</p>
+          </div>
+          <span
+            className="rounded-full px-3 py-1 text-xs font-bold text-white"
+            style={{ backgroundColor: severityBg }}
+          >
+            {fault.severity}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
+          {rows.map(([label, value]) => (
+            <div key={label}>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#95a7c7]">
+                {label}
+              </div>
+              <p className="mt-1 font-mono-metrics text-white">{value}</p>
+            </div>
+          ))}
+        </div>
+      </article>
     </section>
   );
 }

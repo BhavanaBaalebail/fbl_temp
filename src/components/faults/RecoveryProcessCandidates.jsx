@@ -86,7 +86,15 @@ export function RecoveryProcessCandidates({
   const killSupported = isActionSupported(capabilities, actionKeys.kill);
 
   const runAction = async (recommendation) => {
-    setExecutingPid(recommendation.params?.pid);
+    const selectedPid = recommendation.params?.pid;
+    console.info("[recovery] user process action", {
+      action: recommendation.backendAction,
+      pid: selectedPid,
+      command: candidateCommandLine(
+        candidates.find((c) => c.pid === selectedPid) || { command: recommendation.target?.processName }
+      ),
+    });
+    setExecutingPid(selectedPid);
     setActionMessage(null);
     setPending(null);
     try {

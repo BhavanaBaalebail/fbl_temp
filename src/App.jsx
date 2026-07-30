@@ -259,6 +259,7 @@ function App() {
                 connected={telemetry.connected}
                 lastUpdated={telemetry.lastUpdated}
                 linkHealthSummary={telemetry.linkHealthSummary}
+                liveMetrics={telemetry.rawMetrics}
                 statusPillTone={statusPillTone}
                 cardStatusTone={cardStatusTone}
               />

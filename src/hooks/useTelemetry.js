@@ -36,6 +36,7 @@ export function useTelemetry() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [hostname, setHostname] = useState(null);
   const [error, setError] = useState(null);
+  const [rawMetrics, setRawMetrics] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,6 +52,7 @@ export function useTelemetry() {
 
         recordTelemetrySample(inventory, liveMetrics, linkHealth);
 
+        setRawMetrics(liveMetrics);
         setHealth(snapshot.health);
         setMetrics(snapshot.metrics);
         setSeverity(snapshot.severity);
@@ -97,5 +99,6 @@ export function useTelemetry() {
     lastUpdated,
     hostname,
     error,
+    rawMetrics,
   };
 }

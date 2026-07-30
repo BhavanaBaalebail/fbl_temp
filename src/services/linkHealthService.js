@@ -30,10 +30,15 @@ const AFFECTED_PATHS = {
   "IO Control": "IO Control → DMI/PCIe → CPU",
 };
 
-/** GPU temperature thresholds — single source for health, faults, and anomaly cards */
+/** GPU metric thresholds — single source for health, faults, and anomaly cards */
 const GPU_TEMP_THRESHOLDS = {
-  warningC: 40,
-  criticalC: 42,
+  warningC: 80,
+  criticalC: 90,
+};
+
+const GPU_UTIL_THRESHOLDS = {
+  warningMin: 90,
+  criticalMin: 97,
 };
 
 const LINK_HEALTH_SCORE_PENALTY = {
@@ -42,10 +47,83 @@ const LINK_HEALTH_SCORE_PENALTY = {
 };
 
 function gpuTemperatureLevel(tempC) {
-  if (tempC == null) return null;
-  if (tempC >= GPU_TEMP_THRESHOLDS.criticalC) return "critical";
-  if (tempC >= GPU_TEMP_THRESHOLDS.warningC) return "warning";
+  if (tempC == null || Number.isNaN(Number(tempC))) return null;
+  const t = Number(tempC);
+  if (t >= GPU_TEMP_THRESHOLDS.criticalC) return "critical";
+  if (t >= GPU_TEMP_THRESHOLDS.warningC) return "warning";
   return "healthy";
+}
+
+/**
+ * Util > 97% is Critical only when accompanied by elevated GPU temperature (≥ warning band).
+ * Otherwise util > 97% stays Warning; 90–97% is Warning; below 90% is Healthy.
+ */
+function gpuUtilizationLevel(utilPct, tempC) {
+  if (utilPct == null || Number.isNaN(Number(utilPct))) return null;
+  const u = Number(utilPct);
+  if (u > GPU_UTIL_THRESHOLDS.criticalMin) {
+    const tempLevel = gpuTemperatureLevel(tempC);
+    if (tempLevel === "critical" || tempLevel === "warning") return "critical";
+    return "warning";
+  }
+  if (u >= GPU_UTIL_THRESHOLDS.warningMin) return "warning";
+  return "healthy";
+}
+
+function gpuMemoryUtilizationLevel(vramPct) {
+  if (vramPct == null || Number.isNaN(Number(vramPct))) return null;
+  if (Number(vramPct) >= 90) return "warning";
+  return "healthy";
+}
+
+function gpuPowerDrawLevel(powerDrawW, powerLimitW) {
+  if (powerDrawW == null || powerLimitW == null) return null;
+  if (Number(powerDrawW) >= Number(powerLimitW) * 0.95) return "warning";
+  return "healthy";
+}
+
+function gpuLinkStatusLevel(linkStatus) {
+  if (linkStatus == null || linkStatus === "") return null;
+  const s = String(linkStatus);
+  if (/^critical$/i.test(s)) return "critical";
+  if (/^warning$/i.test(s)) return "warning";
+  return "healthy";
+}
+
+function gpuFanLevel(fanPct, tempC) {
+  if (fanPct == null || Number.isNaN(Number(fanPct))) return null;
+  const tempLevel = gpuTemperatureLevel(tempC);
+  if ((tempLevel === "warning" || tempLevel === "critical") && Number(fanPct) < 20) {
+    return tempLevel === "critical" ? "critical" : "warning";
+  }
+  return "healthy";
+}
+
+/**
+ * Worst level across link_health GPU section and live GPU telemetry fields.
+ */
+function computeGpuHealthLevel(gpuM, linkHealthGpuLevel = null) {
+  const levels = [];
+
+  if (linkHealthGpuLevel && linkHealthGpuLevel !== "unknown") {
+    levels.push(linkHealthGpuLevel);
+  }
+
+  if (gpuM) {
+    const metricLevels = [
+      gpuTemperatureLevel(gpuM.temperature_celsius),
+      gpuUtilizationLevel(gpuM.gpu_utilization_percent, gpuM.temperature_celsius),
+      gpuMemoryUtilizationLevel(gpuM.memory_utilization_percent),
+      gpuPowerDrawLevel(gpuM.power_draw_watts, gpuM.power_limit_watts),
+      gpuLinkStatusLevel(gpuM.link_status),
+      gpuFanLevel(gpuM.fan_speed_percent, gpuM.temperature_celsius),
+    ].filter(Boolean);
+
+    levels.push(...metricLevels);
+  }
+
+  if (levels.length === 0) return "healthy";
+  return levels.reduce((worst, current) => worstLevel(worst, current), "healthy");
 }
 
 function coerceGpuArray(value) {
@@ -615,22 +693,14 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
   };
 
   // GPU
-  let gpuLevel = sectionStatus("gpu", lh);
+  const lhGpuLevel = sectionStatus("gpu", lh);
   if (!gpuHasIdentity(gpuM)) {
     assessments.GPU = { level: "unknown", status: "No GPU detected" };
   } else {
-    if (gpuLevel === "unknown") gpuLevel = "healthy";
-
-    const gpuTempLevel = gpuTemperatureLevel(gpuM.temperature_celsius);
-    if (gpuTempLevel === "critical") gpuLevel = worstLevel(gpuLevel, "critical");
-    else if (gpuTempLevel === "warning") gpuLevel = worstLevel(gpuLevel, "warning");
-
-    const linkStatus = gpuM.link_status;
-    if (linkStatus && /^critical$/i.test(String(linkStatus))) {
-      gpuLevel = worstLevel(gpuLevel, "critical");
-    } else if (linkStatus && /^warning$/i.test(String(linkStatus))) {
-      gpuLevel = worstLevel(gpuLevel, "warning");
-    }
+    const gpuLevel = computeGpuHealthLevel(
+      gpuM,
+      lhGpuLevel === "unknown" ? null : lhGpuLevel
+    );
 
     const gpuParts = buildGpuStatusParts(gpuM);
 
@@ -698,8 +768,58 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
   return assessments;
 }
 
-export function buildHealthRowsFromLinkHealth(linkHealth, inventory, metrics) {
+function faultSeverityToLevel(severity) {
+  if (severity === "Critical") return "critical";
+  if (severity === "Warning") return "warning";
+  return "healthy";
+}
+
+/** Merge live threshold faults into component assessments (single health source). */
+function applyThresholdFaultsToAssessments(assessments, thresholdFaults) {
+  const activeByComponent = {};
+  (thresholdFaults || []).forEach((f) => {
+    if (f.severity === "Resolved") return;
+    const comp = f.component;
+    if (!comp) return;
+    if (!activeByComponent[comp]) activeByComponent[comp] = [];
+    activeByComponent[comp].push(f);
+  });
+
+  Object.entries(activeByComponent).forEach(([comp, faults]) => {
+    const key = comp;
+    if (!assessments[key]) return;
+
+    let level = assessments[key].level;
+    const summaries = [];
+    faults.forEach((f) => {
+      level = worstLevel(level, faultSeverityToLevel(f.severity));
+      if (f.metricName != null && f.currentValue != null) {
+        summaries.push(`${f.metricName} ${f.currentValue}`);
+      } else if (f.faultDescription) {
+        summaries.push(f.faultDescription);
+      }
+    });
+
+    assessments[key].level = level;
+    const unique = [...new Set(summaries)];
+    if (unique.length > 0) {
+      const shown = unique.slice(0, 4).join(", ");
+      const extra = unique.length > 4 ? ` (+${unique.length - 4} more)` : "";
+      assessments[key].status = `${statusLabel(level)} — ${shown}${extra}`;
+    }
+  });
+}
+
+/** Component assessments including threshold faults (dashboard, connectivity, summary). */
+export function getMergedComponentAssessments(linkHealth, inventory, metrics) {
   const assessments = assessLinkHealthComponents(linkHealth, inventory, metrics);
+  const thresholdFaults = buildThresholdFaults(linkHealth, inventory, metrics);
+  applyThresholdFaultsToAssessments(assessments, thresholdFaults);
+  return assessments;
+}
+
+export function buildHealthRowsFromLinkHealth(linkHealth, inventory, metrics) {
+  const assessments = getMergedComponentAssessments(linkHealth, inventory, metrics);
   const order = ["CPU", "GPU", "RAM", "DISK", "NIC", "IO Control"];
   return order.map((name) => {
     const a = assessments[name] || { level: "unknown", status: "No data" };
@@ -710,6 +830,76 @@ export function buildHealthRowsFromLinkHealth(linkHealth, inventory, metrics) {
 // ---------------------------------------------------------------------------
 // Threshold-based fault detection (auto-clears when metric returns to healthy)
 // ---------------------------------------------------------------------------
+
+function deviceFromDiskThresholdId(id) {
+  if (!id || typeof id !== "string") return null;
+  const prefixes = [
+    "threshold-disk-busy-",
+    "threshold-disk-queue-",
+    "threshold-disk-latency-",
+    "threshold-disk-throughput-",
+    "threshold-disk-smart-",
+    "threshold-disk-nvme-errors-",
+    "threshold-disk-nvme-wear-",
+    "threshold-disk-sata-",
+  ];
+  for (const prefix of prefixes) {
+    if (id.startsWith(prefix)) return id.slice(prefix.length);
+  }
+  return null;
+}
+
+export function enrichThresholdFaultWithTelemetry(fault, metrics) {
+  if (!fault || fault.source !== "threshold") return fault;
+
+  const timestamp = metrics?.timestamp || new Date().toISOString();
+  const device = deviceFromDiskThresholdId(fault.id);
+  const perf =
+    device != null
+      ? (metrics?.disk?.performance || []).find((p) => p.device === device)
+      : null;
+
+  if (perf) {
+    return {
+      ...fault,
+      telemetryDetail: {
+        type: "disk_performance",
+        device: perf.device ?? device,
+        busy_percent: perf.busy_percent,
+        queue_depth: perf.queue_depth,
+        average_latency_ms: perf.average_latency_ms,
+        total_MB_per_sec: perf.total_MB_per_sec,
+        read_IOPS: perf.read_IOPS,
+        write_IOPS: perf.write_IOPS,
+        timestamp,
+        thresholdCrossed: fault.thresholdCrossed,
+        metricName: fault.metricName,
+        currentValue: fault.currentValue,
+        status: fault.status,
+        severity: fault.severity,
+      },
+    };
+  }
+
+  return {
+    ...fault,
+    telemetryDetail: {
+      type: "threshold",
+      metricName: fault.metricName,
+      currentValue: fault.currentValue,
+      thresholdCrossed: fault.thresholdCrossed,
+      timestamp,
+      status: fault.status,
+      severity: fault.severity,
+    },
+  };
+}
+
+function enrichThresholdFaultList(faults, metrics) {
+  return (faults || []).map((f) =>
+    f.source === "threshold" ? enrichThresholdFaultWithTelemetry(f, metrics) : f
+  );
+}
 
 function thresholdFault({
   id,
@@ -731,7 +921,7 @@ function thresholdFault({
     faultDescription: description,
     affectedPath: AFFECTED_PATHS[component] || "Platform",
     detected: new Date().toISOString(),
-    status: severity === "Critical" ? "Active" : "Monitor",
+    status: "Active",
     action: "View →",
     source: "threshold",
   };
@@ -749,6 +939,7 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
   const smart = metrics?.disk?.smart || {};
   const nvmeArr = Array.isArray(lh.nvme) ? lh.nvme : [];
   const sataArr = Array.isArray(lh.sata) ? lh.sata : [];
+  const perf = metrics?.disk?.performance || [];
   const nicEval = evaluateNicHealth(lh, metrics);
   const faults = [];
 
@@ -966,8 +1157,42 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
             component: "GPU",
             metricName: "Temperature",
             currentValue: `${gpuM.temperature_celsius}°C`,
-            thresholdCrossed: `≥ ${GPU_TEMP_THRESHOLDS.warningC}°C (Warning)`,
+            thresholdCrossed: `${GPU_TEMP_THRESHOLDS.warningC}–${GPU_TEMP_THRESHOLDS.criticalC - 1}°C (Warning)`,
             description: `GPU temperature ${gpuM.temperature_celsius}°C exceeds warning threshold.`,
+          })
+        );
+      }
+    }
+    if (gpuM.gpu_utilization_percent != null) {
+      const gpuUtilLevel = gpuUtilizationLevel(
+        gpuM.gpu_utilization_percent,
+        gpuM.temperature_celsius
+      );
+      if (gpuUtilLevel === "critical") {
+        faults.push(
+          thresholdFault({
+            id: "threshold-gpu-utilization",
+            severity: "Critical",
+            component: "GPU",
+            metricName: "Utilization",
+            currentValue: `${gpuM.gpu_utilization_percent}%`,
+            thresholdCrossed: `> ${GPU_UTIL_THRESHOLDS.criticalMin}% with elevated temperature (Critical)`,
+            description: `GPU utilization ${gpuM.gpu_utilization_percent}% is critically high with elevated GPU temperature.`,
+          })
+        );
+      } else if (gpuUtilLevel === "warning") {
+        faults.push(
+          thresholdFault({
+            id: "threshold-gpu-utilization",
+            severity: "Warning",
+            component: "GPU",
+            metricName: "Utilization",
+            currentValue: `${gpuM.gpu_utilization_percent}%`,
+            thresholdCrossed:
+              Number(gpuM.gpu_utilization_percent) > GPU_UTIL_THRESHOLDS.criticalMin
+                ? `> ${GPU_UTIL_THRESHOLDS.criticalMin}% (Warning — temperature nominal)`
+                : `≥ ${GPU_UTIL_THRESHOLDS.warningMin}% (Warning)`,
+            description: `GPU utilization ${gpuM.gpu_utilization_percent}% exceeds warning threshold.`,
           })
         );
       }
@@ -1093,6 +1318,133 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
         description: `SATA device ${dev} link degraded.`,
       })
     );
+  });
+  perf.forEach((p, i) => {
+    const dev = p.device || p.name || `disk${i}`;
+  
+    // -----------------------------
+    // Disk Busy %
+    // -----------------------------
+    if (p.busy_percent != null) {
+      if (p.busy_percent >= 80) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-busy-${dev}`,
+            severity: "Critical",
+            component: "DISK",
+            metricName: "Disk Busy",
+            currentValue: `${p.busy_percent}%`,
+            thresholdCrossed: "≥ 80% (Critical)",
+            description: `${dev} disk busy at ${p.busy_percent}%.`,
+          })
+        );
+      } else if (p.busy_percent >= 70) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-busy-${dev}`,
+            severity: "Warning",
+            component: "DISK",
+            metricName: "Disk Busy",
+            currentValue: `${p.busy_percent}%`,
+            thresholdCrossed: "≥ 70% (Warning)",
+            description: `${dev} disk busy at ${p.busy_percent}%.`,
+          })
+        );
+      }
+    }
+  
+    // -----------------------------
+    // Queue Depth
+    // -----------------------------
+    if (p.queue_depth != null) {
+      if (p.queue_depth >= 32) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-queue-${dev}`,
+            severity: "Critical",
+            component: "DISK",
+            metricName: "Queue Depth",
+            currentValue: String(p.queue_depth),
+            thresholdCrossed: "≥ 32 (Critical)",
+            description: `${dev} queue depth is ${p.queue_depth}.`,
+          })
+        );
+      } else if (p.queue_depth >= 16) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-queue-${dev}`,
+            severity: "Warning",
+            component: "DISK",
+            metricName: "Queue Depth",
+            currentValue: String(p.queue_depth),
+            thresholdCrossed: "≥ 16 (Warning)",
+            description: `${dev} queue depth is ${p.queue_depth}.`,
+          })
+        );
+      }
+    }
+  
+    // -----------------------------
+    // Average Latency
+    // -----------------------------
+    if (p.average_latency_ms != null) {
+      if (p.average_latency_ms >= 100) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-latency-${dev}`,
+            severity: "Critical",
+            component: "DISK",
+            metricName: "Average Latency",
+            currentValue: `${p.average_latency_ms.toFixed(2)} ms`,
+            thresholdCrossed: "≥ 100 ms (Critical)",
+            description: `${dev} average latency is ${p.average_latency_ms.toFixed(2)} ms.`,
+          })
+        );
+      } else if (p.average_latency_ms >= 20) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-latency-${dev}`,
+            severity: "Warning",
+            component: "DISK",
+            metricName: "Average Latency",
+            currentValue: `${p.average_latency_ms.toFixed(2)} ms`,
+            thresholdCrossed: "≥ 20 ms (Warning)",
+            description: `${dev} average latency is ${p.average_latency_ms.toFixed(2)} ms.`,
+          })
+        );
+      }
+    }
+  
+    // -----------------------------
+    // Optional: Throughput
+    // -----------------------------
+    if (p.total_MB_per_sec != null) {
+      if (p.total_MB_per_sec >= 3500) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-throughput-${dev}`,
+            severity: "Critical",
+            component: "DISK",
+            metricName: "Disk Throughput",
+            currentValue: `${p.total_MB_per_sec.toFixed(1)} MB/s`,
+            thresholdCrossed: "≥ 3500 MB/s (Critical)",
+            description: `${dev} throughput is ${p.total_MB_per_sec.toFixed(1)} MB/s.`,
+          })
+        );
+      } else if (p.total_MB_per_sec >= 2000) {
+        faults.push(
+          thresholdFault({
+            id: `threshold-disk-throughput-${dev}`,
+            severity: "Warning",
+            component: "DISK",
+            metricName: "Disk Throughput",
+            currentValue: `${p.total_MB_per_sec.toFixed(1)} MB/s`,
+            thresholdCrossed: "≥ 2000 MB/s (Warning)",
+            description: `${dev} throughput is ${p.total_MB_per_sec.toFixed(1)} MB/s.`,
+          })
+        );
+      }
+    }
   });
 
   if (nicEval.usableNics.length > 0 && nicEval.upNics.length === 0) {
@@ -1330,7 +1682,8 @@ export function buildFaultLog(linkHealth, inventory, metrics) {
     });
 
   const thresholdFaults = buildThresholdFaults(linkHealth, inventory, metrics);
-  return mergeFaultLogs(thresholdFaults, faults);
+  const enrichedThresholds = enrichThresholdFaultList(thresholdFaults, metrics);
+  return mergeFaultLogs(enrichedThresholds, faults);
 }
 
 // ---------------------------------------------------------------------------
@@ -1354,7 +1707,7 @@ function anomalyRow(faultName, level, subtitle) {
 
 export function buildAnomalyCategories(linkHealth, inventory, metrics) {
   const lh = linkHealth || {};
-  const assessments = assessLinkHealthComponents(linkHealth, inventory, metrics);
+  const assessments = getMergedComponentAssessments(linkHealth, inventory, metrics);
   const cpuM = metrics?.cpu || {};
   const memH = (lh.memory || {}).health || {};
   const cpuH = (lh.cpu || {}).health || {};
@@ -1364,6 +1717,24 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
   const usableNics = nicEval.usableNics;
   const errNicsOnUp = interfacesWithErrors(nicEval.upNics);
   const nvmeArr = Array.isArray(lh.nvme) ? lh.nvme : [];
+  const diskPerf = metrics?.disk?.performance || [];
+  const maxBusy = diskPerf.reduce(
+    (m, p) => (p.busy_percent != null ? Math.max(m, p.busy_percent) : m),
+    0
+  );
+  const maxQueue = diskPerf.reduce(
+    (m, p) => (p.queue_depth != null ? Math.max(m, p.queue_depth) : m),
+    0
+  );
+  const maxLatency = diskPerf.reduce(
+    (m, p) => (p.average_latency_ms != null ? Math.max(m, p.average_latency_ms) : m),
+    0
+  );
+  const maxThroughput = diskPerf.reduce(
+    (m, p) => (p.total_MB_per_sec != null ? Math.max(m, p.total_MB_per_sec) : m),
+    0
+  );
+  const busyDevice = diskPerf.find((p) => p.busy_percent === maxBusy);
 
   const cards = [
     {
@@ -1405,7 +1776,7 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
       overallStatus: overallAnomalyStatus(assessments.GPU?.level),
       rows: [
         anomalyRow(
-          "Thermal throttle",
+          "Temperature",
           gpuTemperatureLevel(gpuM?.temperature_celsius) || (gpuM ? "healthy" : "unknown"),
           gpuM?.temperature_celsius != null
             ? `${gpuM.temperature_celsius}°C`
@@ -1414,21 +1785,34 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
               : "No GPU"
         ),
         anomalyRow(
+          "GPU utilization",
+          gpuUtilizationLevel(gpuM?.gpu_utilization_percent, gpuM?.temperature_celsius) ||
+            (gpuM ? "healthy" : "unknown"),
+          gpuM?.gpu_utilization_percent != null
+            ? `${gpuM.gpu_utilization_percent}%`
+            : "—"
+        ),
+        anomalyRow(
           "PCIe link health",
           sectionStatus("gpu", lh),
           (lh.gpu || [])[0]?.health?.link_status || "Nominal"
         ),
         anomalyRow(
           "VRAM pressure",
-          gpuM?.memory_utilization_percent >= 90 ? "warning" : "healthy",
+          gpuMemoryUtilizationLevel(gpuM?.memory_utilization_percent) || "healthy",
           gpuM?.memory_utilization_percent != null
             ? `${gpuM.memory_utilization_percent}% VRAM`
             : "—"
         ),
         anomalyRow(
           "Power draw",
-          gpuM?.power_draw_watts >= (gpuM?.power_limit_watts || 999) * 0.95 ? "warning" : "healthy",
+          gpuPowerDrawLevel(gpuM?.power_draw_watts, gpuM?.power_limit_watts) || "healthy",
           gpuM?.power_draw_watts != null ? `${gpuM.power_draw_watts}W` : "—"
+        ),
+        anomalyRow(
+          "Fan speed",
+          gpuFanLevel(gpuM?.fan_speed_percent, gpuM?.temperature_celsius) || "healthy",
+          gpuM?.fan_speed_percent != null ? `${gpuM.fan_speed_percent}%` : "—"
         ),
       ],
     },
@@ -1495,6 +1879,30 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
           nvmeArr[0]?.percentage_used != null
             ? `${nvmeArr[0].percentage_used}% life used`
             : "—"
+        ),
+        anomalyRow(
+          "Disk busy",
+          maxBusy >= 80 ? "critical" : maxBusy >= 70 ? "warning" : "healthy",
+          maxBusy > 0
+            ? `${busyDevice?.device || "disk"} ${maxBusy}% busy`
+            : diskPerf.length > 0
+              ? "No busy signal yet"
+              : "—"
+        ),
+        anomalyRow(
+          "Queue depth",
+          maxQueue >= 32 ? "critical" : maxQueue >= 16 ? "warning" : "healthy",
+          maxQueue > 0 ? `peak ${maxQueue}` : diskPerf.length > 0 ? "0" : "—"
+        ),
+        anomalyRow(
+          "Average latency",
+          maxLatency >= 100 ? "critical" : maxLatency >= 20 ? "warning" : "healthy",
+          maxLatency > 0 ? `${maxLatency.toFixed(2)} ms peak` : "—"
+        ),
+        anomalyRow(
+          "Throughput",
+          maxThroughput >= 3500 ? "critical" : maxThroughput >= 2000 ? "warning" : "healthy",
+          maxThroughput > 0 ? `${maxThroughput.toFixed(1)} MB/s peak` : "—"
         ),
       ],
     },
@@ -1634,7 +2042,7 @@ export function buildTopologyContext(inventory, metrics, linkHealth = null) {
  * Used when backend health_summary.score does not reflect PCIe/GPU degradation.
  */
 function computeDerivedLinkHealthSummary(linkHealth, inventory, metrics) {
-  const assessments = assessLinkHealthComponents(linkHealth, inventory, metrics);
+  const assessments = getMergedComponentAssessments(linkHealth, inventory, metrics);
   const levels = Object.values(assessments)
     .map((a) => a.level)
     .filter((l) => l !== "unknown");
@@ -1703,4 +2111,10 @@ export function getLinkHealthSummary(linkHealth, inventory = null, metrics = nul
   };
 }
 
-export { GPU_TEMP_THRESHOLDS, gpuTemperatureLevel };
+export {
+  GPU_TEMP_THRESHOLDS,
+  GPU_UTIL_THRESHOLDS,
+  gpuTemperatureLevel,
+  gpuUtilizationLevel,
+  computeGpuHealthLevel,
+};
