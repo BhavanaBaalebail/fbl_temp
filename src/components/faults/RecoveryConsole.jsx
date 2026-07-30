@@ -15,7 +15,7 @@ import { RecoveryRecommendationDialog } from "./RecoveryRecommendationDialog";
 import { RecoveryConfirmationDialog } from "./RecoveryConfirmationDialog";
 import { RecoveryProcessCandidates } from "./RecoveryProcessCandidates";
 import { RECOVERY_LEVEL_LABELS } from "../../recovery/recoveryActionCatalog";
-import { faultShowsProcessCandidates } from "../../recovery/recoveryProcessDomain";
+import { faultShowsProcessCandidates, processCandidatesDomainForFault, processCandidatesMinPercent } from "../../recovery/recoveryProcessDomain";
 
 const PANEL = {
   bg: "rgba(12, 18, 28, 0.95)",
@@ -77,6 +77,10 @@ function compareSnapshots(before, after) {
     ["gpu_power", "Power Draw", "W"],
     ["nic_errors", "NIC Errors", ""],
     ["nic_up", "Interfaces Up", ""],
+    ["disk_busy", "Disk Busy", "%"],
+    ["disk_queue", "Disk Queue Depth", ""],
+    ["disk_latency", "Disk Latency", " ms"],
+    ["disk_throughput", "Disk Throughput", " MB/s"],
     ["lh_score", "Link Health Score", ""],
   ];
   return keys
@@ -132,7 +136,7 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
     refreshAnalysis();
     setHistory(getRecoveryHistory(fault.id));
     return subscribeRecoveryHistory(() => setHistory(getRecoveryHistory(fault.id)));
-  }, [fault.id, refreshAnalysis]);
+  }, [fault.id, fault.currentValue, refreshAnalysis]);
 
   const runExecution = async (recommendation, confirmed) => {
     setExecuting(true);
@@ -263,12 +267,13 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
           <SectionHeader
             title="Process Candidates"
-            subtitle="Live workloads from GET /recovery/process_candidates · pause or kill per PID"
+            subtitle="Live workloads from GET /recovery/process_candidates · pause, resume, or terminate per PID"
           />
           <RecoveryProcessCandidates
             fault={fault}
             connected={connected}
             capabilities={capabilities}
+            minPercent={processCandidatesMinPercent(processCandidatesDomainForFault(fault))}
             onActionComplete={() => refreshAnalysis()}
           />
         </section>

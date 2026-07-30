@@ -61,6 +61,16 @@ export const RECOMMENDATION_CATALOG = [
     ],
   },
   {
+    id: "disk-workload",
+    label: "Disk Workload Recovery",
+    match: (f) =>
+      f.id?.startsWith("threshold-disk-busy-") ||
+      f.id?.startsWith("threshold-disk-queue-") ||
+      f.id?.startsWith("threshold-disk-latency-") ||
+      f.id?.startsWith("threshold-disk-throughput-"),
+    actionIds: ["disk.pause_process", "disk.resume_process", "disk.terminate_process"],
+  },
+  {
     id: "disk-capacity",
     label: "Disk Capacity Recovery",
     match: (f) => f.id?.startsWith("threshold-disk-capacity"),
@@ -69,6 +79,26 @@ export const RECOMMENDATION_CATALOG = [
       "disk.clean_temp_files",
       "disk.vacuum_journal",
     ],
+  },
+  {
+    id: "disk-smart",
+    label: "Disk SMART Recovery",
+    match: (f) => f.id?.startsWith("threshold-disk-smart-"),
+    actionIds: ["disk.identify_large_directories"],
+  },
+  {
+    id: "disk-nvme-health",
+    label: "NVMe Health Recovery",
+    match: (f) =>
+      f.id?.startsWith("threshold-disk-nvme-errors-") ||
+      f.id?.startsWith("threshold-disk-nvme-wear-"),
+    actionIds: ["disk.identify_large_directories"],
+  },
+  {
+    id: "disk-sata",
+    label: "SATA Link Recovery",
+    match: (f) => f.id?.startsWith("threshold-disk-sata-"),
+    actionIds: ["disk.identify_large_directories"],
   },
   {
     id: "nic-errors",

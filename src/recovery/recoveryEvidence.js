@@ -4,10 +4,31 @@
  */
 
 import { getPrimaryGpu } from "../services/linkHealthService";
+import {
+  deviceFromDiskFaultId,
+  diskPerformanceForFault,
+  mountForFault,
+  nvmeHealthForDevice,
+  smartForDevice,
+} from "./diskRecoveryHelpers";
 
 function fmt(value, suffix = "") {
   if (value === null || value === undefined) return null;
   return `${value}${suffix}`;
+}
+
+function topDiskProcess(list) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const p = list[0];
+  return {
+    pid: p.pid ?? null,
+    name: p.process ?? p.command ?? null,
+    cpu: p.cpu_percent ?? null,
+    memory: p.memory_percent ?? null,
+    readKbps: p.read_kbps ?? null,
+    writeKbps: p.write_kbps ?? null,
+    ioTotalKbps: p.io_total_kbps ?? null,
+  };
 }
 
 function topProcess(list) {
@@ -34,6 +55,9 @@ export function getTopProcessForFault(fault, metrics) {
   if (component === "GPU" || id.includes("gpu")) {
     return topProcess(metrics?.top_processes?.gpu);
   }
+  if (component === "DISK" && /disk-busy|disk-queue|disk-latency|disk-throughput/.test(id)) {
+    return topDiskProcess(metrics?.top_processes?.disk);
+  }
   if (component === "CPU" || id.includes("cpu")) {
     return topProcess(metrics?.top_processes?.cpu);
   }
@@ -47,9 +71,10 @@ export function getTopProcessForFault(fault, metrics) {
  * @param {object} fault
  * @param {object} metrics
  * @param {object} inventory
+ * @param {object} [linkHealth]
  * @returns {object|null}
  */
-export function getRecoveryTarget(fault, metrics, inventory) {
+export function getRecoveryTarget(fault, metrics, inventory, linkHealth = null) {
   const id = fault?.id || "";
   const sys = metrics?.system || {};
   const target = { process: null, interface: null, mount: null, device: null, service: null };
@@ -66,7 +91,14 @@ export function getRecoveryTarget(fault, metrics, inventory) {
   }
 
   if (id.startsWith("threshold-disk-capacity-")) {
-    target.mount = id.replace("threshold-disk-capacity-", "");
+    const mountRow = mountForFault(fault, metrics);
+    target.mount =
+      mountRow?.mountpoint || mountRow?.mount || id.replace("threshold-disk-capacity-", "");
+  }
+
+  const diskDev = deviceFromDiskFaultId(id);
+  if (diskDev) {
+    target.device = diskDev;
   }
 
   if (id.includes("gpu-pcie") || id.includes("io-pcie")) {
@@ -189,27 +221,120 @@ export function collectEvidence(fault, inventory, metrics, linkHealth) {
   }
 
   if (component === "DISK" || fault.id?.includes("disk")) {
-    (metrics?.disk?.mounts || []).forEach((m) => {
-      if (m.usage_percent != null) {
+    const device = deviceFromDiskFaultId(fault.id) || null;
+    const perf = diskPerformanceForFault(fault, metrics);
+    const mount = mountForFault(fault, metrics);
+    const smart = smartForDevice(device, metrics);
+    const nvme = nvmeHealthForDevice(device, linkHealth);
+    const invDisk = (inventory?.disk || []).find(
+      (d) => d.name === device || (device && d.name && device.startsWith(d.name))
+    );
+
+    if (metrics?.timestamp) {
+      items.push({ label: "Metrics Timestamp", value: metrics.timestamp });
+    }
+    if (device) items.push({ label: "Device", value: device });
+    if (perf?.transport) items.push({ label: "Transport", value: perf.transport });
+    if (invDisk?.type) items.push({ label: "Disk Type", value: invDisk.type });
+    if (invDisk?.model) items.push({ label: "Model", value: invDisk.model });
+
+    if (perf?.busy_percent != null) {
+      items.push({ label: "Busy %", value: fmt(perf.busy_percent, "%") });
+    }
+    if (perf?.queue_depth != null) {
+      items.push({ label: "Queue Depth", value: String(perf.queue_depth) });
+    }
+    if (perf?.average_latency_ms != null) {
+      items.push({ label: "Average Latency", value: fmt(perf.average_latency_ms, " ms") });
+    }
+    if (perf?.read_IOPS != null) items.push({ label: "Read IOPS", value: String(perf.read_IOPS) });
+    if (perf?.write_IOPS != null) items.push({ label: "Write IOPS", value: String(perf.write_IOPS) });
+    if (perf?.read_MB_per_sec != null) {
+      items.push({ label: "Read Throughput", value: fmt(perf.read_MB_per_sec, " MB/s") });
+    }
+    if (perf?.write_MB_per_sec != null) {
+      items.push({ label: "Write Throughput", value: fmt(perf.write_MB_per_sec, " MB/s") });
+    }
+    if (perf?.total_MB_per_sec != null) {
+      items.push({ label: "Total Throughput", value: fmt(perf.total_MB_per_sec, " MB/s") });
+    }
+
+    if (mount) {
+      items.push({
+        label: "Mount Point",
+        value: mount.mountpoint || mount.mount || "—",
+      });
+      if (mount.filesystem) items.push({ label: "Filesystem", value: mount.filesystem });
+      if (mount.usage_percent != null) {
+        items.push({ label: "Capacity Used", value: fmt(mount.usage_percent, "%") });
+      }
+      if (mount.used_gb != null && mount.size_gb != null) {
+        items.push({ label: "Capacity", value: `${mount.used_gb} / ${mount.size_gb} GB` });
+      }
+    } else {
+      (metrics?.disk?.mounts || []).forEach((m) => {
+        if (m.usage_percent != null) {
+          items.push({
+            label: `Mount ${m.mountpoint || m.mount}`,
+            value: fmt(m.usage_percent, "%"),
+          });
+        }
+      });
+    }
+
+    if (smart) {
+      if (smart.health) items.push({ label: "SMART Health", value: smart.health });
+      if (smart.temperature_celsius != null) {
+        items.push({ label: "SMART Temperature", value: fmt(smart.temperature_celsius, "°C") });
+      }
+      if (smart.reallocated_sectors != null) {
+        items.push({ label: "Reallocated Sectors", value: String(smart.reallocated_sectors) });
+      }
+      if (smart.pending_sectors != null) {
+        items.push({ label: "Pending Sectors", value: String(smart.pending_sectors) });
+      }
+      if (smart.power_on_hours != null) {
+        items.push({ label: "Power-On Hours", value: String(smart.power_on_hours) });
+      }
+    }
+
+    if (nvme) {
+      if (nvme.percentage_used != null) {
+        items.push({ label: "NVMe Wear", value: fmt(nvme.percentage_used, "%") });
+      }
+      if (nvme.media_errors > 0) {
+        items.push({ label: "NVMe Media Errors", value: String(nvme.media_errors) });
+      }
+      if (nvme.critical_warning != null && nvme.critical_warning !== 0) {
+        items.push({ label: "NVMe Critical Warning", value: String(nvme.critical_warning) });
+      }
+      if (nvme.available_spare != null) {
+        items.push({ label: "NVMe Available Spare", value: fmt(nvme.available_spare, "%") });
+      }
+      if (nvme.temperature != null) {
+        items.push({ label: "NVMe Temperature", value: fmt(nvme.temperature, "°C") });
+      }
+    }
+
+    const sataArr = Array.isArray(linkHealth?.sata) ? linkHealth.sata : [];
+    sataArr.forEach((s, i) => {
+      if (s.link_degraded) {
         items.push({
-          label: `Mount ${m.mountpoint || m.mount}`,
-          value: fmt(m.usage_percent, "%"),
+          label: `SATA Link ${s.link || i}`,
+          value: `${s.negotiated_speed || "?"} (degraded)`,
         });
       }
     });
-    Object.entries(metrics?.disk?.smart || {}).forEach(([dev, s]) => {
-      if (s.health) items.push({ label: `SMART ${dev}`, value: s.health });
-      if (s.temperature_celsius != null) {
-        items.push({ label: `SMART Temp ${dev}`, value: fmt(s.temperature_celsius, "°C") });
-      }
-    });
-    (linkHealth?.nvme || []).forEach((d, i) => {
-      const name = d.device || d.name || `nvme${i}`;
-      if (d.percentage_used != null) {
-        items.push({ label: `NVMe Wear ${name}`, value: fmt(d.percentage_used, "%") });
-      }
-      if (d.media_errors > 0) items.push({ label: `NVMe Media Errors ${name}`, value: String(d.media_errors) });
-    });
+
+    const topDisk = topDiskProcess(metrics?.top_processes?.disk);
+    if (topDisk?.pid) {
+      items.push({
+        label: "Top Disk I/O Process",
+        value: `PID ${topDisk.pid} · ${topDisk.name || "unknown"} · ${topDisk.ioTotalKbps ?? "—"} KB/s total`,
+      });
+    }
+
+    raw.disk = { perf, smart, nvme, mount, device };
   }
 
   if (component === "NIC" || fault.id?.includes("nic")) {
@@ -267,6 +392,22 @@ export function readMetricValue(path, metrics, linkHealth, fault) {
     );
     return mount?.usage_percent ?? null;
   }
+  if (path === "disk.busy_percent") {
+    const perf = diskPerformanceForFault(fault, metrics);
+    return perf?.busy_percent ?? null;
+  }
+  if (path === "disk.queue_depth") {
+    const perf = diskPerformanceForFault(fault, metrics);
+    return perf?.queue_depth ?? null;
+  }
+  if (path === "disk.average_latency_ms") {
+    const perf = diskPerformanceForFault(fault, metrics);
+    return perf?.average_latency_ms ?? null;
+  }
+  if (path === "disk.total_MB_per_sec") {
+    const perf = diskPerformanceForFault(fault, metrics);
+    return perf?.total_MB_per_sec ?? null;
+  }
   if (path === "nic.total_errors") {
     return (metrics?.nic || []).reduce((s, n) => s + (n.rx_errors || 0) + (n.tx_errors || 0), 0);
   }
@@ -294,6 +435,13 @@ export function readMetricValue(path, metrics, linkHealth, fault) {
 
 export function snapshotMetrics(metrics, linkHealth, inventory = null) {
   const gpu = getPrimaryGpu(metrics, inventory, linkHealth);
+  const diskPerf = metrics?.disk?.performance || [];
+  const peakPerf =
+    diskPerf.length > 0
+      ? diskPerf.reduce((best, p) =>
+          (p.busy_percent || 0) >= (best?.busy_percent || 0) ? p : best
+        )
+      : null;
   return {
     cpu_usage: metrics?.cpu?.usage_percent ?? null,
     cpu_temp: metrics?.cpu?.temperature_celsius ?? null,
@@ -306,6 +454,10 @@ export function snapshotMetrics(metrics, linkHealth, inventory = null) {
     nic_errors: (metrics?.nic || []).reduce((s, n) => s + (n.rx_errors || 0) + (n.tx_errors || 0), 0),
     nic_up: (metrics?.nic || []).filter((n) => String(n.link_state || "").toLowerCase() === "up").length,
     lh_score: linkHealth?.health_summary?.score ?? null,
+    disk_busy: peakPerf?.busy_percent ?? null,
+    disk_queue: peakPerf?.queue_depth ?? null,
+    disk_latency: peakPerf?.average_latency_ms ?? null,
+    disk_throughput: peakPerf?.total_MB_per_sec ?? null,
     mounts: (metrics?.disk?.mounts || []).map((m) => ({
       mp: m.mountpoint || m.mount,
       pct: m.usage_percent ?? null,

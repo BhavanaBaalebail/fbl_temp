@@ -1671,6 +1671,146 @@ def get_top_cpu_processes(limit: int = 10) -> list[dict[str, Any]]:
         })
 
     return results
+
+
+@safe_collect("top_disk_io_processes", fallback=[])
+def get_top_disk_io_processes(limit: int = 50) -> list[dict[str, Any]]:
+    """Top disk I/O consumers ranked by combined read+write KB/s.
+
+    Prefers `pidstat -d` when available; falls back to a short /proc/pid/io
+    delta sample so the list is always based on live kernel counters.
+    """
+    if command_exists("pidstat"):
+        out = run(["pidstat", "-d", "-h", "-p", "ALL", "1", "1"], timeout=20)
+        parsed: list[dict[str, Any]] = []
+        for line in out.splitlines():
+            if not line.startswith("Average:") or "PID" in line or "kB_rd/s" in line:
+                continue
+            parts = line.split()
+            if len(parts) < 7:
+                continue
+            try:
+                pid = int(parts[1])
+            except (TypeError, ValueError):
+                continue
+            read_kbps = safe_float(parts[2]) or 0.0
+            write_kbps = safe_float(parts[3]) or 0.0
+            command = " ".join(parts[6:])
+            parsed.append({
+                "pid": pid,
+                "read_kbps": round(read_kbps, 2),
+                "write_kbps": round(write_kbps, 2),
+                "io_total_kbps": round(read_kbps + write_kbps, 2),
+                "command": command,
+                "process": command.split()[0] if command else None,
+                "source": "pidstat",
+            })
+        if parsed:
+            parsed.sort(key=lambda p: p.get("io_total_kbps") or 0.0, reverse=True)
+            return _enrich_disk_io_process_meta(parsed[:limit])
+
+    def _sample_proc_io() -> dict[int, tuple[int, int]]:
+        snap: dict[int, tuple[int, int]] = {}
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            io_path = entry / "io"
+            if not io_path.is_file():
+                continue
+            text = read_file(io_path)
+            rb = safe_int(get_value(r"^read_bytes:\s+(\d+)", text)) or 0
+            wb = safe_int(get_value(r"^write_bytes:\s+(\d+)", text)) or 0
+            snap[pid] = (rb, wb)
+        return snap
+
+    ps_out = run(["ps", "-eo", "pid,user,%cpu,%mem,comm,args", "--sort=-%cpu"])
+    ps_meta: dict[int, dict[str, Any]] = {}
+    for line in ps_out.splitlines()[1:]:
+        parts = line.split(None, 6)
+        if len(parts) < 7:
+            continue
+        pid = safe_int(parts[0])
+        if pid is None:
+            continue
+        ps_meta[pid] = {
+            "pid": pid,
+            "user": parts[1],
+            "cpu_percent": safe_float(parts[2]),
+            "memory_percent": safe_float(parts[3]),
+            "process": parts[5],
+            "command": parts[6],
+        }
+
+    first = _sample_proc_io()
+    time.sleep(0.35)
+    second = _sample_proc_io()
+    dt = 0.35
+    results: list[dict[str, Any]] = []
+    for pid, (rb1, wb1) in first.items():
+        rb2, wb2 = second.get(pid, (None, None))
+        if rb2 is None or wb2 is None:
+            continue
+        read_kbps = max(rb2 - rb1, 0) / 1024.0 / dt
+        write_kbps = max(wb2 - wb1, 0) / 1024.0 / dt
+        total = read_kbps + write_kbps
+        if total <= 0:
+            continue
+        meta = ps_meta.get(pid, {})
+        results.append({
+            "pid": pid,
+            "user": meta.get("user"),
+            "cpu_percent": meta.get("cpu_percent"),
+            "memory_percent": meta.get("memory_percent"),
+            "process": meta.get("process"),
+            "command": meta.get("command"),
+            "read_kbps": round(read_kbps, 2),
+            "write_kbps": round(write_kbps, 2),
+            "io_total_kbps": round(total, 2),
+            "source": "proc_io",
+        })
+
+    results.sort(key=lambda p: p.get("io_total_kbps") or 0.0, reverse=True)
+    return results[:limit]
+
+
+def _enrich_disk_io_process_meta(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach ps user/cpu/mem fields to pidstat rows when missing."""
+    if not processes:
+        return processes
+    pids = {p["pid"] for p in processes if p.get("pid") is not None}
+    if not pids:
+        return processes
+    ps_out = run(["ps", "-eo", "pid,user,%cpu,%mem,comm,args"])
+    meta: dict[int, dict[str, Any]] = {}
+    for line in ps_out.splitlines()[1:]:
+        parts = line.split(None, 6)
+        if len(parts) < 7:
+            continue
+        pid = safe_int(parts[0])
+        if pid is None or pid not in pids:
+            continue
+        meta[pid] = {
+            "user": parts[1],
+            "cpu_percent": safe_float(parts[2]),
+            "memory_percent": safe_float(parts[3]),
+            "process": parts[5],
+            "command": parts[6],
+        }
+    enriched = []
+    for proc in processes:
+        pid = proc.get("pid")
+        m = meta.get(pid, {})
+        enriched.append({
+            **proc,
+            "user": proc.get("user") or m.get("user"),
+            "cpu_percent": proc.get("cpu_percent") if proc.get("cpu_percent") is not None else m.get("cpu_percent"),
+            "memory_percent": proc.get("memory_percent") if proc.get("memory_percent") is not None else m.get("memory_percent"),
+            "process": proc.get("process") or m.get("process"),
+            "command": proc.get("command") or m.get("command"),
+        })
+    return enriched
+
 @safe_collect("gpu_processes", fallback=[])
 def get_gpu_processes() -> list[dict[str, Any]]:
     """
@@ -1807,6 +1947,7 @@ def collect_metrics() -> dict[str, Any]:
         "top_processes": {
                 "cpu": get_top_cpu_processes(),
                 "gpu": get_gpu_processes(),
+                "disk": get_top_disk_io_processes(limit=20),
     },
     }
     # DEMO: overwrite RAM/DISK/NIC fields per whatever severity is currently
@@ -4135,6 +4276,37 @@ def _disk_identify_large_directories(p):
     return res
 
 
+def _disk_pause_process(p):
+    res = _recovery_signal(p["pid"], signal.SIGSTOP, verify_stopped=True)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Process {p['pid']} paused (SIGSTOP) -- {res['verification']}, reducing further disk I/O from this workload."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "pause failed")
+    )
+    return res
+
+
+def _disk_resume_process(p):
+    res = _recovery_signal(p["pid"], signal.SIGCONT, verify_stopped=False)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Process {p['pid']} resumed (SIGCONT) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "resume failed")
+    )
+    return res
+
+
+def _disk_terminate_process(p):
+    logger.info("disk.terminate_process: backend received pid=%s", p.get("pid"))
+    res = _recovery_signal(p["pid"], signal.SIGTERM, verify_gone=True)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Process {p['pid']} terminated (SIGTERM) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "terminate failed")
+    )
+    return res
+
+
 # ---- NIC handlers ------------------------------------------------------------
 
 def _nic_restart_interface(p):
@@ -4276,6 +4448,15 @@ RECOVERY_ACTIONS: dict[str, dict[str, Any]] = {
     "disk.identify_large_directories": {"handler": _disk_identify_large_directories, "level": 1, "domain": "disk",
                                          "required_params": [], "supported_check": _recovery_binary_check("du"),
                                          "description": "Read-only scan of directory sizes."},
+    "disk.pause_process": {"handler": _disk_pause_process, "level": 2, "domain": "disk",
+                            "required_params": ["pid"], "supported_check": _recovery_always_supported,
+                            "description": "Suspend a disk I/O-heavy process (SIGSTOP)."},
+    "disk.resume_process": {"handler": _disk_resume_process, "level": 1, "domain": "disk",
+                             "required_params": ["pid"], "supported_check": _recovery_always_supported,
+                             "description": "Resume a paused process (SIGCONT)."},
+    "disk.terminate_process": {"handler": _disk_terminate_process, "level": 3, "domain": "disk",
+                                "required_params": ["pid"], "supported_check": _recovery_always_supported,
+                                "description": "Gracefully terminate a disk I/O-heavy process (SIGTERM)."},
 
     "nic.restart_interface": {"handler": _nic_restart_interface, "level": 2, "domain": "nic",
                                "required_params": ["interface"], "supported_check": _recovery_root_check("ip"),
@@ -4542,6 +4723,19 @@ def get_recovery_process_candidates(domain: str = "cpu", min_percent: float = 1.
             candidates.append({
                 **proc,
                 "usage_percent": pct,
+                "recoverable": ok,
+                "reason": None if ok else reason,
+            })
+    elif domain == "disk":
+        for proc in get_top_disk_io_processes(limit=max(limit, 50)):
+            kbps = proc.get("io_total_kbps") or 0.0
+            if kbps < min_percent:
+                continue
+            pid = proc.get("pid")
+            ok, reason, _ = validate_pid(pid) if pid is not None else (False, "invalid pid", None)
+            candidates.append({
+                **proc,
+                "usage_percent": kbps,
                 "recoverable": ok,
                 "reason": None if ok else reason,
             })
@@ -4833,8 +5027,8 @@ def recovery_process_candidates_endpoint():
         GET /recovery/process_candidates?domain=cpu&min_percent=1&limit=50
     """
     domain = request.args.get("domain", default="cpu")
-    if domain not in ("cpu", "gpu"):
-        return jsonify({"success": False, "message": "domain must be 'cpu' or 'gpu'"}), 400
+    if domain not in ("cpu", "gpu", "disk"):
+        return jsonify({"success": False, "message": "domain must be 'cpu', 'gpu', or 'disk'"}), 400
 
     min_percent = request.args.get("min_percent", default=1.0, type=float)
     limit = request.args.get("limit", default=50, type=int)
@@ -4951,3 +5145,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

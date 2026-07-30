@@ -3,6 +3,7 @@
  */
 
 import { hasRecoveryPlaybook } from "./recoveryPlaybooks";
+import { isDiskHardwareFault, isDiskWorkloadFault } from "./diskRecoveryHelpers";
 
 /**
  * @returns {{ percent: number, label: string, factors: string[] }}
@@ -31,16 +32,37 @@ export function computeRecoveryConfidence(fault, evidence, playbook) {
     factors.push("Threshold fault with verifiable clearance criteria.");
   }
 
+  const id = fault.id || "";
+
   const nonRecoverable = [
     "fatal-errors",
     "uncorrectable",
-    "smart-",
-    "nvme-errors",
     "cpu-fatal",
   ];
-  if (nonRecoverable.some((p) => (fault.id || "").includes(p))) {
+  if (
+    nonRecoverable.some((p) => id.includes(p)) ||
+    (id.includes("smart-") && !id.includes("disk-smart")) ||
+    (id.includes("nvme-errors") && !id.includes("disk-nvme"))
+  ) {
     score = Math.min(score, 25);
     factors.push("Hardware error class — automated recovery unlikely.");
+  }
+
+  if (isDiskHardwareFault(fault)) {
+    score = Math.min(score, 30);
+    factors.push("Hardware disk fault — automated recovery limited to diagnostics and escalation.");
+  } else if (id.includes("disk-capacity")) {
+    score += 5;
+    factors.push("Capacity fault — cleanup actions may restore headroom.");
+  }
+
+  if (isDiskWorkloadFault(fault)) {
+    score += 10;
+    factors.push("Disk workload fault — process throttling can reduce I/O pressure.");
+    if (items.some((i) => i.label === "Top Disk I/O Process")) {
+      score += 10;
+      factors.push("Top disk I/O process identified from live telemetry.");
+    }
   }
 
   if (fault.severity === "Warning") {

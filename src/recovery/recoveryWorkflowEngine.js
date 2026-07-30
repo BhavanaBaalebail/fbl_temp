@@ -72,6 +72,10 @@ function primaryMetricForFault(fault) {
   if (id.includes("gpu-temperature")) return "gpu.temperature_celsius";
   if (id.includes("gpu-vram")) return "gpu.memory_utilization_percent";
   if (id.includes("ram")) return "memory.usage_percent";
+  if (id.includes("disk-busy")) return "disk.busy_percent";
+  if (id.includes("disk-queue")) return "disk.queue_depth";
+  if (id.includes("disk-latency")) return "disk.average_latency_ms";
+  if (id.includes("disk-throughput")) return "disk.total_MB_per_sec";
   if (id.includes("disk-capacity")) return "disk.mount_usage";
   if (id.includes("nic")) return "nic.total_errors";
   return null;
@@ -111,7 +115,20 @@ export async function analyzeRecovery(fault) {
   const analysis = buildRecoveryAnalysis(fault, inventory, metrics, linkHealth, capabilities);
   const timeline = [
     createTimelineEvent("fault_detected", `${fault.component} fault under analysis`),
+    createTimelineEvent(
+      "telemetry_collected",
+      `${analysis.evidence.items.length} evidence field(s) collected from live telemetry`
+    ),
   ];
+
+  if (analysis.rca.length > 0) {
+    timeline.push(
+      createTimelineEvent(
+        "rca_generated",
+        `${analysis.rca.length} root cause factor(s) identified from telemetry`
+      )
+    );
+  }
 
   if (analysis.target?.process?.pid) {
     timeline.push(

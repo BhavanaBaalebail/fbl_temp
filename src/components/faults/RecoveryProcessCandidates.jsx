@@ -25,12 +25,25 @@ const PANEL = {
 function buildPendingRecommendation(actionKey, candidate, domain) {
   const action = getActionByBackendKey(actionKey);
   const isKill = actionKey.includes("kill") || actionKey.includes("terminate");
+  const isResume = actionKey.includes("resume");
+  let label = "Pause Process";
+  if (isResume) label = "Resume Process";
+  else if (isKill) label = domain === "disk" ? "Terminate Process" : "Kill Process";
+
   return {
     actionId: action?.id || actionKey,
     backendAction: actionKey,
-    label: isKill ? "Kill Process" : "Pause Process",
-    level: action?.level ?? (isKill ? 3 : 2),
-    impact: action?.impact || (isKill ? "Terminates the selected process." : "Suspends the selected process."),
+    label,
+    level: action?.level ?? (isKill ? 3 : isResume ? 1 : 2),
+    impact:
+      action?.impact ||
+      (isKill
+        ? domain === "disk"
+          ? "Sends SIGTERM to the selected process."
+          : "Terminates the selected process."
+        : isResume
+          ? "Sends SIGCONT to resume the selected process."
+          : "Suspends the selected process."),
     params: { pid: candidate.pid },
     target: {
       pid: candidate.pid,
@@ -38,6 +51,10 @@ function buildPendingRecommendation(actionKey, candidate, domain) {
     },
     domain,
   };
+}
+
+function diskUsageEmptyLabel(minPercent) {
+  return `No processes at or above ${minPercent} KB/s total disk I/O.`;
 }
 
 export function RecoveryProcessCandidates({
@@ -83,6 +100,9 @@ export function RecoveryProcessCandidates({
   }, [refresh, fault?.id]);
 
   const pauseSupported = isActionSupported(capabilities, actionKeys.pause);
+  const resumeSupported = actionKeys.resume
+    ? isActionSupported(capabilities, actionKeys.resume)
+    : false;
   const killSupported = isActionSupported(capabilities, actionKeys.kill);
 
   const runAction = async (recommendation) => {
@@ -139,6 +159,13 @@ export function RecoveryProcessCandidates({
     }
   };
 
+  const emptyLabel =
+    domain === "disk"
+      ? diskUsageEmptyLabel(meta?.min_percent ?? minPercent)
+      : `No processes at or above ${meta?.min_percent ?? minPercent}% ${domain === "gpu" ? "GPU" : "CPU"} usage.`;
+
+  const terminateLabel = domain === "disk" ? "Terminate" : "Kill";
+
   return (
     <>
       <RecoveryConfirmationDialog
@@ -158,10 +185,84 @@ export function RecoveryProcessCandidates({
           </span>
         </p>
       ) : candidates.length === 0 ? (
-        <p className="text-sm text-[#64748b]">
-          No processes at or above {meta?.min_percent ?? minPercent}% {domain === "gpu" ? "GPU" : "CPU"}{" "}
-          usage.
-        </p>
+        <p className="text-sm text-[#64748b]">{emptyLabel}</p>
+      ) : domain === "disk" ? (
+        <div className="hw-table-wrap overflow-x-auto">
+          <table className="hw-table min-w-full text-xs">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Process</th>
+                <th className="text-right">Read KB/s</th>
+                <th className="text-right">Write KB/s</th>
+                <th className="text-right">Total I/O</th>
+                <th className="text-right">CPU %</th>
+                <th className="text-right">Mem %</th>
+                <th>User</th>
+                <th className="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((row) => {
+                const busy = executingPid === row.pid;
+                const pauseDisabled = !row.recoverable || !pauseSupported || busy;
+                const resumeDisabled = !row.recoverable || !resumeSupported || busy;
+                const killDisabled = !row.recoverable || !killSupported || busy;
+                const tip = !row.recoverable ? row.reason || "Not recoverable" : undefined;
+                return (
+                  <tr key={row.pid}>
+                    <td className="font-mono-metrics">{row.pid}</td>
+                    <td className="max-w-[220px] truncate" title={candidateCommandLine(row)}>
+                      {candidateCommandLine(row)}
+                    </td>
+                    <td className="text-right font-mono-metrics">{row.read_kbps ?? "—"}</td>
+                    <td className="text-right font-mono-metrics">{row.write_kbps ?? "—"}</td>
+                    <td className="text-right font-mono-metrics">
+                      {candidateUsageLabel(row, domain)}
+                    </td>
+                    <td className="text-right font-mono-metrics">{row.cpu_percent ?? "—"}</td>
+                    <td className="text-right font-mono-metrics">{row.memory_percent ?? "—"}</td>
+                    <td>{row.user || "—"}</td>
+                    <td className="text-right">
+                      <div className="flex justify-end gap-1.5">
+                        <button
+                          type="button"
+                          className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                          disabled={pauseDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.pause, row)}
+                        >
+                          Pause
+                        </button>
+                        {actionKeys.resume && (
+                          <button
+                            type="button"
+                            className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                            disabled={resumeDisabled}
+                            title={tip}
+                            onClick={() => requestAction(actionKeys.resume, row)}
+                          >
+                            Resume
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-40"
+                          style={{ background: killDisabled ? "#475569" : "#b91c1c" }}
+                          disabled={killDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.kill, row)}
+                        >
+                          {terminateLabel}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <div className="hw-table-wrap overflow-x-auto">
           <table className="hw-table min-w-full text-xs">
@@ -209,7 +310,7 @@ export function RecoveryProcessCandidates({
                           title={tip}
                           onClick={() => requestAction(actionKeys.kill, row)}
                         >
-                          Kill
+                          {terminateLabel}
                         </button>
                       </div>
                     </td>

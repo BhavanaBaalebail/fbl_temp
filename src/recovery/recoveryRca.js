@@ -3,6 +3,15 @@
  */
 
 import { getPrimaryGpu } from "../services/linkHealthService";
+import {
+  deviceFromDiskFaultId,
+  diskPerformanceForFault,
+  isDiskHardwareFault,
+  isDiskWorkloadFault,
+  mountForFault,
+  nvmeHealthForDevice,
+  smartForDevice,
+} from "./diskRecoveryHelpers";
 
 /**
  * @param {object} fault
@@ -80,15 +89,124 @@ export function generateRootCauseAnalysis(fault, evidence, metrics, linkHealth) 
   }
 
   if (id.includes("disk-capacity")) {
-    const mount = id.replace("threshold-disk-capacity-", "");
-    const m = (metrics?.disk?.mounts || []).find((x) => (x.mountpoint || x.mount) === mount);
-    if (m?.usage_percent != null) {
-      causes.push(`Mount ${mount} at ${m.usage_percent}% capacity per live metrics.`);
+    const mount = mountForFault(fault, metrics);
+    if (mount?.usage_percent != null) {
+      causes.push(
+        `Mount ${mount.mountpoint || mount.mount} at ${mount.usage_percent}% capacity — storage exhaustion risk.`
+      );
+      if (mount.used_gb != null && mount.free_gb != null) {
+        causes.push(`Only ${mount.free_gb} GB free of ${mount.size_gb ?? "—"} GB on this filesystem.`);
+      }
+    }
+  }
+
+  if (id.includes("disk-busy")) {
+    const perf = diskPerformanceForFault(fault, metrics);
+    if (perf?.busy_percent != null) {
+      causes.push(
+        `Block device ${perf.device || deviceFromDiskFaultId(id)} is ${perf.busy_percent}% busy — sustained I/O saturation.`
+      );
+    }
+    if (byLabel["Top Disk I/O Process"]) {
+      causes.push(`Primary I/O consumer: ${byLabel["Top Disk I/O Process"]}.`);
+    } else if (causes.length === 0) {
+      causes.push("Disk busy threshold exceeded — workload or background I/O is saturating the device.");
+    }
+  }
+
+  if (id.includes("disk-queue")) {
+    const perf = diskPerformanceForFault(fault, metrics);
+    if (perf?.queue_depth != null) {
+      causes.push(
+        `Queue depth on ${perf.device || deviceFromDiskFaultId(id)} is ${perf.queue_depth} — storage congestion / backlog.`
+      );
+    }
+    if (byLabel["Top Disk I/O Process"]) {
+      causes.push(`Likely contributor: ${byLabel["Top Disk I/O Process"]}.`);
+    }
+  }
+
+  if (id.includes("disk-latency")) {
+    const perf = diskPerformanceForFault(fault, metrics);
+    if (perf?.average_latency_ms != null) {
+      causes.push(
+        `Average I/O latency on ${perf.device || deviceFromDiskFaultId(id)} is ${perf.average_latency_ms} ms — device or queue latency elevated.`
+      );
+    }
+    if (perf?.busy_percent != null && perf.busy_percent >= 70) {
+      causes.push(`Device busy at ${perf.busy_percent}%, which commonly increases service time.`);
+    }
+  }
+
+  if (id.includes("disk-throughput")) {
+    const perf = diskPerformanceForFault(fault, metrics);
+    if (perf?.total_MB_per_sec != null) {
+      causes.push(
+        `Combined throughput on ${perf.device || deviceFromDiskFaultId(id)} is ${perf.total_MB_per_sec} MB/s — unusually high I/O load.`
+      );
+    }
+    if (perf?.read_MB_per_sec != null || perf?.write_MB_per_sec != null) {
+      causes.push(
+        `Read ${perf.read_MB_per_sec ?? "—"} MB/s · Write ${perf.write_MB_per_sec ?? "—"} MB/s per live counters.`
+      );
     }
   }
 
   if (id.includes("disk-smart")) {
-    causes.push("SMART health status not PASSED/OK — potential drive degradation.");
+    const dev = deviceFromDiskFaultId(id);
+    const smart = smartForDevice(dev, metrics);
+    if (smart?.health) {
+      causes.push(`SMART health for ${dev || "disk"} reports ${smart.health} — potential hardware degradation.`);
+    }
+    if (smart?.reallocated_sectors > 0) {
+      causes.push(`${smart.reallocated_sectors} reallocated sector(s) recorded by SMART.`);
+    }
+    if (smart?.pending_sectors > 0) {
+      causes.push(`${smart.pending_sectors} pending sector(s) — imminent failure risk.`);
+    }
+    if (causes.length === 0) {
+      causes.push("SMART health status not PASSED/OK — drive reliability compromised.");
+    }
+  }
+
+  if (id.includes("disk-nvme-errors")) {
+    const dev = deviceFromDiskFaultId(id);
+    const nvme = nvmeHealthForDevice(dev, linkHealth);
+    if (nvme?.media_errors > 0) {
+      causes.push(`NVMe ${dev || nvme.device || "device"} reports ${nvme.media_errors} media error(s) — physical storage failure signal.`);
+    }
+    if (nvme?.critical_warning) {
+      causes.push(`NVMe critical warning flag set (${nvme.critical_warning}).`);
+    }
+  }
+
+  if (id.includes("disk-nvme-wear")) {
+    const dev = deviceFromDiskFaultId(id);
+    const nvme = nvmeHealthForDevice(dev, linkHealth);
+    if (nvme?.percentage_used != null) {
+      causes.push(`NVMe endurance at ${nvme.percentage_used}% — wear threshold exceeded.`);
+    }
+    if (nvme?.available_spare != null) {
+      causes.push(`Available spare blocks: ${nvme.available_spare}%.`);
+    }
+  }
+
+  if (id.includes("disk-sata")) {
+    const dev = deviceFromDiskFaultId(id);
+    const sata = (linkHealth?.sata || []).find((s) => (s.link || "").includes(dev || ""));
+    if (sata?.link_degraded) {
+      causes.push(`SATA link ${sata.link || dev} negotiated below maximum speed (${sata.negotiated_speed}).`);
+    } else {
+      causes.push(`SATA device ${dev || "unknown"} link degraded per link_health telemetry.`);
+    }
+  }
+
+  if (isDiskHardwareFault(fault) && causes.length <= 1) {
+    causes.push("Hardware-level disk fault — automated workload throttling cannot repair media degradation; plan backup and replacement.");
+  }
+
+  if (isDiskWorkloadFault(fault) && byLabel["Top Disk I/O Process"] && !causes.some((c) => c.includes("I/O consumer"))) {
+    causes.push(`Top disk I/O process identified: ${byLabel["Top Disk I/O Process"]}.`);
   }
 
   if (id.includes("nic-error") || id.includes("nic-lh")) {

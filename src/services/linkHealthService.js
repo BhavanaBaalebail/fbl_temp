@@ -321,51 +321,138 @@ const VIRTUAL_INTERFACE_PATTERNS = [
   /^nm-/i,
 ];
 
-const WIFI_INTERFACE_PATTERNS = [/^(wlan|wlp|wlo|wl)/i];
+/** Cumulative error/drop counters below this are treated as nominal (not a NIC quality fault). */
+const NIC_COUNTER_WARNING_THRESHOLD = 100;
+
+function isLoopbackInterface(name) {
+  return String(name || "").toLowerCase() === "lo";
+}
 
 function isVirtualOrIgnoredInterface(name) {
   if (!name) return true;
+  if (isLoopbackInterface(name)) return true;
   return VIRTUAL_INTERFACE_PATTERNS.some((re) => re.test(String(name)));
 }
 
-function isWifiInterface(name) {
-  if (!name) return false;
-  return WIFI_INTERFACE_PATTERNS.some((re) => re.test(String(name)));
+/** Non-loopback, non-virtual interfaces (Ethernet, Wi-Fi, etc.) — names not hardcoded. */
+function enumeratePhysicalNetworkInterfaces(interfaces) {
+  return (interfaces || []).filter(
+    (iface) => Boolean(iface?.name) && !isVirtualOrIgnoredInterface(iface.name)
+  );
 }
 
 function isLinkUp(iface) {
-  return String(iface?.link_state || "").toLowerCase() === "up";
+  const link = String(iface?.link_state || "").toLowerCase();
+  if (link === "up") return true;
+  if (link === "down") return false;
+  const oper = String(iface?.operstate || iface?.oper_state || "").toLowerCase();
+  return oper === "up";
 }
 
-function isUsablePhysicalInterface(iface) {
-  return Boolean(iface?.name) && !isVirtualOrIgnoredInterface(iface.name);
+function interfaceCounterTotal(iface) {
+  return (
+    (iface?.rx_errors || 0) +
+    (iface?.tx_errors || 0) +
+    (iface?.rx_dropped || 0) +
+    (iface?.tx_dropped || 0) +
+    (iface?.collisions || 0)
+  );
 }
 
-function isIntentionallyDisabledOrUnused(iface, allPhysicalInterfaces) {
-  if (!iface) return true;
+function interfaceExceedsCounterThreshold(iface) {
+  return interfaceCounterTotal(iface) > NIC_COUNTER_WARNING_THRESHOLD;
+}
 
-  if (iface.enabled === false || iface.unused === true) return true;
+function nicLinkHealthCounterTotal(health) {
+  const h = health || {};
+  return Object.entries(h).reduce((sum, [k, v]) => {
+    if (/crc|error|drop|overrun|collision/i.test(k) && typeof v === "number" && v > 0) {
+      return sum + v;
+    }
+    return sum;
+  }, 0);
+}
 
-  const adminState = String(iface.admin_state || iface.adminState || "").toLowerCase();
-  if (adminState === "down" || adminState === "disabled") return true;
+function nicLinkHealthHasErrors(linkHealth, upInterfaceNames) {
+  const upSet =
+    upInterfaceNames instanceof Set
+      ? upInterfaceNames
+      : new Set(Array.isArray(upInterfaceNames) ? upInterfaceNames : []);
+  if (upSet.size === 0) return false;
 
-  const operstate = String(iface.operstate || iface.oper_state || "").toLowerCase();
-  if (operstate === "notpresent") return true;
+  const arr = Array.isArray(linkHealth?.nic) ? linkHealth.nic : [];
+  return arr.some((entry) => {
+    const name = entry.name || entry.interface;
+    if (!name || !upSet.has(name)) return false;
+    return nicLinkHealthCounterTotal(entry.health) > NIC_COUNTER_WARNING_THRESHOLD;
+  });
+}
 
-  // Down Wi-Fi must not reduce health when Ethernet (or another interface) is up.
-  if (isWifiInterface(iface.name) && !isLinkUp(iface)) {
-    const otherActive = allPhysicalInterfaces.some(
-      (n) => n.name !== iface.name && isLinkUp(n)
-    );
-    if (otherActive) return true;
+function interfacesWithErrors(interfaces) {
+  return (interfaces || []).filter((n) => isLinkUp(n) && interfaceExceedsCounterThreshold(n));
+}
+
+function buildNicHealthyStatus(upNics, downNics) {
+  const parts = [`${upNics.length} active (${upNics.map((n) => n.name).join(", ")})`];
+  if (downNics.length > 0) {
+    parts.push(`${downNics.length} inactive (${downNics.map((n) => n.name).join(", ")})`);
+  }
+  return `Healthy — ${parts.join(", ")}`;
+}
+
+/**
+ * NIC health = availability (≥1 UP physical interface) + quality (errors on UP interfaces only).
+ * Down/unused interfaces do not affect availability or warning counters.
+ */
+function evaluateNicHealth(linkHealth, metrics) {
+  const lh = linkHealth || {};
+  const allNics = metrics?.nic || [];
+  const physicalNics = enumeratePhysicalNetworkInterfaces(allNics);
+  const upNics = physicalNics.filter(isLinkUp);
+  const downNics = physicalNics.filter((n) => !isLinkUp(n));
+  const upNames = new Set(upNics.map((n) => n.name));
+  const errNicsOnUp = interfacesWithErrors(upNics);
+  const lhErrors = nicLinkHealthHasErrors(lh, upNames);
+  const connected = hasNetworkConnectivity(metrics, upNics);
+  const hasQualityIssue = errNicsOnUp.length > 0 || lhErrors;
+
+  let nicLevel = "healthy";
+
+  if (physicalNics.length === 0) {
+    nicLevel = "unknown";
+  } else if (upNics.length === 0) {
+    nicLevel = "critical";
+  } else if (hasQualityIssue) {
+    nicLevel = "warning";
   }
 
-  return false;
-}
+  let status;
+  if (physicalNics.length === 0) {
+    status = "Unknown — no network interfaces detected";
+  } else if (upNics.length === 0) {
+    status = "Critical — No active network interface detected.";
+  } else if (hasQualityIssue) {
+    const errNames = errNicsOnUp.map((n) => n.name);
+    status =
+      errNames.length > 0
+        ? `Warning — NIC Link Health Counters - Errors detected (${errNames.join(", ")})`
+        : "Warning — NIC Link Health Counters - Errors detected";
+  } else {
+    status = buildNicHealthyStatus(upNics, downNics);
+  }
 
-function filterUsablePhysicalInterfaces(interfaces) {
-  const physical = (interfaces || []).filter(isUsablePhysicalInterface);
-  return physical.filter((iface) => !isIntentionallyDisabledOrUnused(iface, physical));
+  return {
+    level: nicLevel,
+    status,
+    availabilityLevel: upNics.length === 0 && physicalNics.length > 0 ? "critical" : "healthy",
+    qualityLevel: hasQualityIssue ? "warning" : "healthy",
+    physicalNics,
+    usableNics: physicalNics,
+    upNics,
+    downNics,
+    allNics,
+    connected,
+  };
 }
 
 function hasNetworkConnectivity(metrics, upInterfaces) {
@@ -379,88 +466,7 @@ function hasNetworkConnectivity(metrics, upInterfaces) {
   const routeIface = system.default_route_interface || system.default_gateway_interface;
   if (routeIface && upInterfaces.some((n) => n.name === routeIface)) return true;
 
-  // At least one usable interface is link-up — treat as L2 connectivity present.
   return upInterfaces.length > 0;
-}
-
-function nicLinkHealthHasErrors(linkHealth, usableNames) {
-  const arr = Array.isArray(linkHealth?.nic) ? linkHealth.nic : [];
-  return arr.some((entry) => {
-    const name = entry.name || entry.interface;
-    if (name && usableNames.size > 0 && !usableNames.has(name)) return false;
-    const h = entry.health || {};
-    return Object.keys(h).some(
-      (k) => /crc|error|drop|overrun|collision/i.test(k) && (h[k] || 0) > 0
-    );
-  });
-}
-
-function interfacesWithErrors(interfaces) {
-  return interfaces.filter(
-    (n) => isLinkUp(n) && (n.rx_errors || 0) + (n.tx_errors || 0) > 0
-  );
-}
-
-function buildNicHealthyStatus(upNics, downNics) {
-  const parts = [`${upNics.length} active (${upNics.map((n) => n.name).join(", ")})`];
-  if (downNics.length > 0) {
-    parts.push(`${downNics.length} down (${downNics.map((n) => n.name).join(", ")})`);
-  }
-  return `Healthy — ${parts.join(", ")}`;
-}
-
-function evaluateNicHealth(linkHealth, metrics) {
-  const lh = linkHealth || {};
-  const allNics = metrics?.nic || [];
-  const allPhysical = (allNics || []).filter(isUsablePhysicalInterface);
-  const usableNics = filterUsablePhysicalInterfaces(allNics);
-  const usableNames = new Set(usableNics.map((n) => n.name));
-  const upNics = usableNics.filter(isLinkUp);
-  const downNics = usableNics.filter((n) => !isLinkUp(n));
-  const errNicsOnUp = interfacesWithErrors(upNics);
-  const lhErrors = nicLinkHealthHasErrors(lh, usableNames);
-  const connected = hasNetworkConnectivity(metrics, upNics);
-
-  let nicLevel = "healthy";
-
-  if (usableNics.length === 0) {
-    nicLevel = allPhysical.length === 0 ? "unknown" : "healthy";
-  } else if (upNics.length === 0) {
-    nicLevel = "critical";
-  } else if (!connected) {
-    nicLevel = "critical";
-  } else if (errNicsOnUp.length > 0 || lhErrors) {
-    nicLevel = errNicsOnUp.some((n) => (n.rx_errors || 0) + (n.tx_errors || 0) > 100)
-      ? "critical"
-      : "warning";
-  }
-
-  let status;
-  if (allPhysical.length === 0) {
-    status = "Unknown — no physical interfaces detected";
-  } else if (usableNics.length === 0) {
-    status = "Healthy — no active usable interfaces required";
-  } else if (upNics.length === 0) {
-    status = `Critical — all usable interfaces down (${downNics.map((n) => n.name).join(", ")})`;
-  } else if (!connected) {
-    status = `Critical — connectivity lost (${upNics.map((n) => n.name).join(", ")} up, no route)`;
-  } else if (errNicsOnUp.length > 0 || lhErrors) {
-    const errNames = errNicsOnUp.map((n) => n.name);
-    status = `${statusLabel(nicLevel)} — ${errNames.length > 0 ? `errors on ${errNames.join(", ")}` : "link health counter errors"}`;
-  } else {
-    status = buildNicHealthyStatus(upNics, downNics);
-  }
-
-  return {
-    level: nicLevel,
-    status,
-    physicalNics: allPhysical,
-    usableNics,
-    upNics,
-    downNics,
-    allNics,
-    connected,
-  };
 }
 
 function isRemovedComponentEvent(message, category, device) {
@@ -1447,51 +1453,40 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
     }
   });
 
-  if (nicEval.usableNics.length > 0 && nicEval.upNics.length === 0) {
+  if (nicEval.physicalNics.length > 0 && nicEval.upNics.length === 0) {
     faults.push(
       thresholdFault({
         id: "threshold-nic-link-down",
         severity: "Critical",
         component: "NIC",
         metricName: "Link State",
-        currentValue: "All down",
-        thresholdCrossed: "All usable interfaces down (Critical)",
-        description: "All usable network interfaces are link-down.",
-      })
-    );
-  } else if (nicEval.connected === false && nicEval.upNics.length > 0) {
-    faults.push(
-      thresholdFault({
-        id: "threshold-nic-connectivity",
-        severity: "Critical",
-        component: "NIC",
-        metricName: "Connectivity",
-        currentValue: "Unreachable",
-        thresholdCrossed: "No route/gateway (Critical)",
-        description: "Network interfaces up but connectivity lost.",
+        currentValue: "No active interface",
+        thresholdCrossed: "No UP interface (Critical)",
+        description: "No active network interface detected.",
       })
     );
   }
+
+  const upNames = new Set(nicEval.upNics.map((n) => n.name));
   const errNicsOnUp = interfacesWithErrors(nicEval.upNics);
-  const totalErrors = errNicsOnUp.reduce(
-    (sum, n) => sum + (n.rx_errors || 0) + (n.tx_errors || 0),
-    0
-  );
-  if (totalErrors > 0) {
-    const severity = totalErrors > 100 ? "Critical" : "Warning";
+  const lhErrorsOnUp = nicLinkHealthHasErrors(lh, upNames);
+
+  if (errNicsOnUp.length > 0) {
+    const totalCounters = errNicsOnUp.reduce((sum, n) => sum + interfaceCounterTotal(n), 0);
     faults.push(
       thresholdFault({
         id: "threshold-nic-errors",
-        severity,
+        severity: "Warning",
         component: "NIC",
         metricName: "RX/TX Errors",
-        currentValue: String(totalErrors),
-        thresholdCrossed: severity === "Critical" ? "> 100 (Critical)" : "> 0 (Warning)",
-        description: `Network interfaces reported ${totalErrors} RX/TX error(s).`,
+        currentValue: String(totalCounters),
+        thresholdCrossed: `> ${NIC_COUNTER_WARNING_THRESHOLD} on active interface (Warning)`,
+        description: `Active interface(s) exceeded counter threshold (${totalCounters} total): ${errNicsOnUp.map((n) => n.name).join(", ")}.`,
       })
     );
   }
-  if (nicLinkHealthHasErrors(lh, new Set(nicEval.usableNics.map((n) => n.name)))) {
+
+  if (lhErrorsOnUp) {
     faults.push(
       thresholdFault({
         id: "threshold-nic-lh-counters",
@@ -1499,8 +1494,8 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
         component: "NIC",
         metricName: "Link Health Counters",
         currentValue: "Errors detected",
-        thresholdCrossed: "CRC/error/drop > 0 (Warning)",
-        description: "NIC link_health counters report CRC, error, or drop events.",
+        thresholdCrossed: `CRC/error/drop sum > ${NIC_COUNTER_WARNING_THRESHOLD} on UP interface (Warning)`,
+        description: "NIC Link Health Counters - Errors detected",
       })
     );
   }
@@ -1714,8 +1709,9 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
   const gpuM = getPrimaryGpu(metrics, inventory, lh);
   const nicEval = evaluateNicHealth(lh, metrics);
   const physicalNics = nicEval.physicalNics;
-  const usableNics = nicEval.usableNics;
+  const upNics = nicEval.upNics;
   const errNicsOnUp = interfacesWithErrors(nicEval.upNics);
+  const upNames = new Set(upNics.map((n) => n.name));
   const nvmeArr = Array.isArray(lh.nvme) ? lh.nvme : [];
   const diskPerf = metrics?.disk?.performance || [];
   const maxBusy = diskPerf.reduce(
@@ -1917,34 +1913,42 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
           assessments.NIC?.status || "—"
         ),
         anomalyRow(
-          "Link state (usable)",
-          assessments.NIC?.level === "critical"
-            ? "critical"
-            : assessments.NIC?.level === "warning"
-              ? "warning"
-              : "healthy",
-          usableNics.length > 0
-            ? usableNics.map((n) => `${n.name}: ${n.link_state || "?"}`).join(", ")
-            : physicalNics.map((n) => `${n.name}: ${n.link_state || "?"}`).join(", ") || "—"
-        ),
-        anomalyRow(
-          "CRC / frame errors",
-          errNicsOnUp.length > 0 || nicLinkHealthHasErrors(lh, new Set(usableNics.map((n) => n.name)))
-            ? assessments.NIC?.level === "critical"
-              ? "critical"
-              : "warning"
-            : "healthy",
-          usableNics.filter((n) => isLinkUp(n)).length > 0
-            ? usableNics
-                .filter((n) => isLinkUp(n))
-                .map((n) => `${n.name}: RX ${n.rx_errors || 0}, TX ${n.tx_errors || 0}`)
-                .join("; ")
+          "Interface availability",
+          nicEval.upNics.length === 0 && physicalNics.length > 0 ? "critical" : "healthy",
+          physicalNics.length > 0
+            ? physicalNics.map((n) => `${n.name}: ${n.link_state || "?"}`).join(", ")
             : "—"
         ),
         anomalyRow(
+          "Link health counters (active)",
+          errNicsOnUp.length > 0 || nicLinkHealthHasErrors(lh, upNames) ? "warning" : "healthy",
+          upNics.length > 0
+            ? upNics
+                .map((n) => {
+                  const total = interfaceCounterTotal(n);
+                  const level =
+                    total > NIC_COUNTER_WARNING_THRESHOLD
+                      ? "over threshold"
+                      : total > 0
+                        ? "nominal"
+                        : "clean";
+                  return `${n.name}: ${total} (${level})`;
+                })
+                .join("; ")
+            : "No active interface"
+        ),
+        anomalyRow(
           "Connectivity",
-          nicEval.connected === false ? "critical" : "healthy",
-          nicEval.connected ? "Route / gateway reachable" : "No connectivity detected"
+          nicEval.upNics.length === 0
+            ? "critical"
+            : nicEval.connected === false
+              ? "warning"
+              : "healthy",
+          nicEval.upNics.length === 0
+            ? "No active interface"
+            : nicEval.connected
+              ? "Route / gateway reachable"
+              : "Active interface(s) up, route check inconclusive"
         ),
       ],
     },
