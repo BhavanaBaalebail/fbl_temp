@@ -50,6 +50,28 @@ export function generateRootCauseAnalysis(fault, evidence, metrics, linkHealth) 
     }
   }
 
+  if (id.includes("gpu-utilization") && gpu?.gpu_utilization_percent != null) {
+    causes.push(`GPU compute utilization at ${gpu.gpu_utilization_percent}% per live nvidia-smi telemetry.`);
+    if (byLabel["Top GPU Process"]) {
+      causes.push(`Primary GPU consumer: ${byLabel["Top GPU Process"]}.`);
+    }
+    if (gpu.temperature_celsius != null && gpu.temperature_celsius >= 80) {
+      causes.push(`GPU temperature elevated to ${gpu.temperature_celsius}°C alongside high utilization.`);
+    }
+  }
+
+  if (id.includes("gpu-power") && gpu?.power_draw_watts != null) {
+    causes.push(
+      `GPU power draw at ${gpu.power_draw_watts}W${gpu.power_limit_watts != null ? ` of ${gpu.power_limit_watts}W limit` : ""}.`
+    );
+    if (gpu.gpu_utilization_percent != null && gpu.gpu_utilization_percent >= 90) {
+      causes.push(`Sustained workload at ${gpu.gpu_utilization_percent}% utilization driving power consumption.`);
+    }
+    if (byLabel["Top GPU Process"]) {
+      causes.push(`Likely contributor: ${byLabel["Top GPU Process"]}.`);
+    }
+  }
+
   if (id.includes("gpu-vram") && gpu?.memory_utilization_percent != null) {
     causes.push(`GPU VRAM utilization at ${gpu.memory_utilization_percent}%.`);
     if (byLabel["Top GPU Process"]) causes.push(`Primary GPU memory consumer: ${byLabel["Top GPU Process"]}.`);
@@ -61,7 +83,7 @@ export function generateRootCauseAnalysis(fault, evidence, metrics, linkHealth) 
   }
 
   if (id.includes("cpu-thermal")) {
-    if (cpu.usage_percent >= 70) causes.push(`Elevated CPU usage (${cpu.usage_percent}%) contributing to thermal load.`);
+    if (cpu.usage_percent >= 80) causes.push(`Elevated CPU usage (${cpu.usage_percent}%) contributing to thermal load.`);
     const cpuH = (linkHealth?.cpu || {})?.health || {};
     const throttle =
       (cpuH.thermal_throttling_total_core_count || 0) +
@@ -209,12 +231,53 @@ export function generateRootCauseAnalysis(fault, evidence, metrics, linkHealth) 
     causes.push(`Top disk I/O process identified: ${byLabel["Top Disk I/O Process"]}.`);
   }
 
+  if (id.includes("nic-utilization")) {
+    const sys = metrics?.system || {};
+    const nics = metrics?.nic || [];
+    const defIface = sys.default_route_interface;
+    const primary =
+      (defIface ? nics.find((n) => n.name === defIface) : null) ||
+      nics.find((n) => String(n.link_state || "").toLowerCase() === "up") ||
+      nics[0];
+    if (primary?.utilization_percent != null) {
+      causes.push(
+        `NIC link utilization at ${primary.utilization_percent}% exceeds combined RX+TX threshold.`
+      );
+    }
+    const topNet =
+      (metrics?.top_processes?.network || []).find((p) => (p.total_mbps || 0) > 0) ||
+      (metrics?.top_processes?.nic || [])[0];
+    if (topNet?.pid) {
+      const rate =
+        topNet.total_mbps != null
+          ? `${topNet.total_mbps} Mbps total`
+          : `${topNet.total_kbps ?? "—"} KB/s total`;
+      causes.push(
+        `Top bandwidth consumer: PID ${topNet.pid} · ${topNet.process || topNet.program || "unknown"} · ${rate}.`
+      );
+    }
+  }
+
   if (id.includes("nic-error") || id.includes("nic-lh")) {
     causes.push("Network interface error counters elevated in live metrics or link_health.");
+    const topNic = (metrics?.top_processes?.nic || [])[0];
+    if (topNic?.pid) {
+      causes.push(
+        `Top bandwidth consumer: PID ${topNic.pid} · ${topNic.process || topNic.program || "unknown"} · ${topNic.total_kbps ?? "—"} KB/s total.`
+      );
+    }
   }
 
   if (id.includes("nic-connectivity") || id.includes("nic-link-down")) {
     causes.push("Network connectivity or link state degraded per live interface telemetry.");
+    const sys = metrics?.system || {};
+    if (sys.network_connectivity === false) {
+      causes.push("Host reports network connectivity unreachable (gateway/internet probe failed).");
+    }
+    const down = (metrics?.nic || []).filter((n) => String(n.link_state || "").toLowerCase() !== "up");
+    if (down.length > 0) {
+      causes.push(`Interface(s) down: ${down.map((n) => n.name).join(", ")}.`);
+    }
   }
 
   if (id.includes("gpu-pcie")) {

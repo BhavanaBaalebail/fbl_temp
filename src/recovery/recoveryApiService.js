@@ -103,7 +103,7 @@ export async function fetchRecoveryHistory(limit = 50) {
 }
 
 /**
- * @param {"cpu"|"gpu"|"disk"} domain
+ * @param {"cpu"|"gpu"|"disk"|"nic"} domain
  * @param {{ minPercent?: number, limit?: number }} [options]
  */
 export async function fetchProcessCandidates(domain, options = {}) {

@@ -31,6 +31,24 @@ function topDiskProcess(list) {
   };
 }
 
+function topNicProcess(list) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const p = list[0];
+  return {
+    pid: p.pid ?? null,
+    name: p.process ?? p.program ?? p.command ?? null,
+    process: p.process ?? p.program ?? null,
+    cpu: p.cpu_percent ?? null,
+    memory: p.memory_percent ?? null,
+    rxKbps: p.received_kbps ?? null,
+    txKbps: p.sent_kbps ?? null,
+    totalKbps: p.total_kbps ?? null,
+    rx_mbps: p.rx_mbps ?? null,
+    tx_mbps: p.tx_mbps ?? null,
+    total_mbps: p.total_mbps ?? null,
+  };
+}
+
 function topProcess(list) {
   if (!Array.isArray(list) || list.length === 0) return null;
   const p = list[0];
@@ -57,6 +75,17 @@ export function getTopProcessForFault(fault, metrics) {
   }
   if (component === "DISK" && /disk-busy|disk-queue|disk-latency|disk-throughput/.test(id)) {
     return topDiskProcess(metrics?.top_processes?.disk);
+  }
+  if (component === "NIC" || id.includes("nic")) {
+    const withRate = (list) =>
+      (list || []).find((p) => (p.total_mbps || 0) > 0 || (p.total_kbps || 0) > 0);
+    const withPid = (list) => (list || []).find((p) => p.pid);
+    const fromNetwork =
+      withRate(metrics?.top_processes?.network) ||
+      withRate(metrics?.top_processes?.nic) ||
+      withPid(metrics?.top_processes?.nic) ||
+      withPid(metrics?.top_processes?.network);
+    return fromNetwork ? topNicProcess([fromNetwork]) : null;
   }
   if (component === "CPU" || id.includes("cpu")) {
     return topProcess(metrics?.top_processes?.cpu);
@@ -139,12 +168,22 @@ export function collectEvidence(fault, inventory, metrics, linkHealth) {
     items.push({ label: fault.metricName, value: fault.currentValue || null });
   }
   if (fault.thresholdCrossed) {
-    items.push({ label: "Threshold", value: fault.thresholdCrossed });
+    const thresholdLabel =
+      fault.id === "threshold-cpu-usage" ? "Utilization Threshold" : "Threshold";
+    items.push({ label: thresholdLabel, value: fault.thresholdCrossed });
   }
 
   const component = fault.component;
 
   if (component === "GPU" || fault.id?.includes("gpu")) {
+    if (metrics?.timestamp) {
+      items.push({ label: "Metrics Timestamp", value: metrics.timestamp });
+    }
+    if (gpu?.model) items.push({ label: "GPU Model", value: gpu.model });
+    if (gpu?.vendor) items.push({ label: "Vendor", value: gpu.vendor });
+    if (gpu?.pci_bus_id) items.push({ label: "PCI Bus ID", value: gpu.pci_bus_id });
+    if (gpu?.driver_version) items.push({ label: "Driver", value: gpu.driver_version });
+    if (gpu?.cuda_version) items.push({ label: "CUDA", value: gpu.cuda_version });
     if (gpu?.temperature_celsius != null) {
       items.push({ label: "GPU Temperature", value: fmt(gpu.temperature_celsius, "°C") });
     }
@@ -154,20 +193,40 @@ export function collectEvidence(fault, inventory, metrics, linkHealth) {
     if (gpu?.memory_utilization_percent != null) {
       items.push({ label: "VRAM Usage", value: fmt(gpu.memory_utilization_percent, "%") });
     }
+    if (gpu?.memory_used_mb != null && gpu?.vram_total_mb != null) {
+      items.push({
+        label: "VRAM Allocated",
+        value: `${gpu.memory_used_mb} / ${gpu.vram_total_mb} MB`,
+      });
+    } else if (gpu?.memory_used_mb != null) {
+      items.push({ label: "VRAM Used", value: `${gpu.memory_used_mb} MB` });
+    }
     if (gpu?.power_draw_watts != null) {
       items.push({ label: "Power Draw", value: fmt(gpu.power_draw_watts, "W") });
     }
     if (gpu?.power_limit_watts != null) {
       items.push({ label: "Power Limit", value: fmt(gpu.power_limit_watts, "W") });
     }
+    if (gpu?.fan_speed_percent != null) {
+      items.push({ label: "Fan Speed", value: fmt(gpu.fan_speed_percent, "%") });
+    }
+    if (gpu?.graphics_clock_mhz != null) {
+      items.push({ label: "Graphics Clock", value: fmt(gpu.graphics_clock_mhz, " MHz") });
+    }
+    if (gpu?.memory_clock_mhz != null) {
+      items.push({ label: "Memory Clock", value: fmt(gpu.memory_clock_mhz, " MHz") });
+    }
+    if (gpu?.link_status) {
+      items.push({ label: "PCIe Link Status", value: gpu.link_status });
+    }
     if (gpuLh?.health?.link_status) {
-      items.push({ label: "PCIe Link Status", value: gpuLh.health.link_status });
+      items.push({ label: "Link Health Status", value: gpuLh.health.link_status });
     }
     if (topGpu?.pid) {
-      items.push({
-        label: "Top GPU Process",
-        value: `PID ${topGpu.pid} · ${topGpu.name || "unknown"}${topGpu.gpuCompute != null ? ` · ${topGpu.gpuCompute}% compute` : ""}`,
-      });
+      const parts = [`PID ${topGpu.pid}`, topGpu.name || "unknown"];
+      if (topGpu.gpuCompute != null) parts.push(`${topGpu.gpuCompute}% compute`);
+      if (topGpu.gpuMemory != null) parts.push(`${topGpu.gpuMemory}% VRAM`);
+      items.push({ label: "Top GPU Process", value: parts.join(" · ") });
     }
     raw.gpu = gpu;
   }
@@ -338,19 +397,66 @@ export function collectEvidence(fault, inventory, metrics, linkHealth) {
   }
 
   if (component === "NIC" || fault.id?.includes("nic")) {
+    const sys = metrics?.system || {};
+    const defIface = sys.default_route_interface;
+    const primary =
+      (defIface ? nics.find((n) => n.name === defIface) : null) ||
+      nics.find((n) => String(n.link_state || "").toLowerCase() === "up") ||
+      nics[0];
     const up = nics.filter((n) => String(n.link_state || "").toLowerCase() === "up");
     items.push({ label: "Interfaces Up", value: `${up.length} / ${nics.length}` });
     const totalErr = nics.reduce((s, n) => s + (n.rx_errors || 0) + (n.tx_errors || 0), 0);
     items.push({ label: "RX/TX Errors", value: String(totalErr) });
+    const totalDropped = nics.reduce((s, n) => s + (n.rx_dropped || 0) + (n.tx_dropped || 0), 0);
+    if (totalDropped > 0) {
+      items.push({ label: "RX/TX Dropped", value: String(totalDropped) });
+    }
     if (sys.network_connectivity != null) {
-      items.push({ label: "Network Connectivity", value: sys.network_connectivity ? "Reachable" : "Unreachable" });
+      items.push({
+        label: "Network Connectivity",
+        value: sys.network_connectivity ? "Reachable" : "Unreachable",
+      });
     }
     if (sys.default_route_interface) {
       items.push({ label: "Default Route", value: sys.default_route_interface });
     }
-    up.slice(0, 3).forEach((n) => {
-      items.push({ label: `Interface ${n.name}`, value: `${n.link_state || "?"} · RX ${n.rx_errors || 0} TX ${n.tx_errors || 0}` });
-    });
+    if (primary) {
+      items.push({
+        label: `Primary Interface ${primary.name}`,
+        value: `${primary.link_state || "?"} · ${primary.speed || "—"} · RX err ${primary.rx_errors || 0} TX err ${primary.tx_errors || 0}`,
+      });
+      if (primary.rx_mbps != null || primary.tx_mbps != null) {
+        items.push({
+          label: "Live Throughput",
+          value: `RX ${primary.rx_mbps ?? "—"} Mbps · TX ${primary.tx_mbps ?? "—"} Mbps`,
+        });
+      }
+      if (primary.utilization_percent != null) {
+        items.push({
+          label: "Link Utilization",
+          value: `${primary.utilization_percent}%`,
+        });
+      } else if (primary.rx_utilization_percent != null || primary.tx_utilization_percent != null) {
+        items.push({
+          label: "Link Utilization",
+          value: `RX ${primary.rx_utilization_percent ?? "—"}% · TX ${primary.tx_utilization_percent ?? "—"}%`,
+        });
+      }
+    }
+    const topNet = (metrics?.top_processes?.network || []).find((p) => (p.total_mbps || 0) > 0);
+    const topNic = topNet || topNicProcess(metrics?.top_processes?.nic);
+    if (topNic?.pid) {
+      const parts = [`PID ${topNic.pid}`, topNic.name || topNic.process || "unknown"];
+      if (topNic.total_mbps != null) parts.push(`${topNic.total_mbps} Mbps total`);
+      else if (topNic.totalKbps != null) parts.push(`${topNic.totalKbps} KB/s total`);
+      if (topNic.rx_mbps != null || topNic.tx_mbps != null) {
+        parts.push(`RX ${topNic.rx_mbps ?? "—"} · TX ${topNic.tx_mbps ?? "—"} Mbps`);
+      } else if (topNic.rxKbps != null || topNic.txKbps != null) {
+        parts.push(`RX ${topNic.rxKbps ?? "—"} · TX ${topNic.txKbps ?? "—"} KB/s`);
+      }
+      items.push({ label: "Top Network Process", value: parts.join(" · ") });
+    }
+    raw.nic = { primary, nics };
   }
 
   if (component === "IO Control") {
@@ -408,6 +514,16 @@ export function readMetricValue(path, metrics, linkHealth, fault) {
     const perf = diskPerformanceForFault(fault, metrics);
     return perf?.total_MB_per_sec ?? null;
   }
+  if (path === "nic.utilization_percent") {
+    const sys = metrics?.system || {};
+    const nics = metrics?.nic || [];
+    const defIface = sys.default_route_interface;
+    const primary =
+      (defIface ? nics.find((n) => n.name === defIface) : null) ||
+      nics.find((n) => String(n.link_state || "").toLowerCase() === "up") ||
+      nics[0];
+    return primary?.utilization_percent ?? null;
+  }
   if (path === "nic.total_errors") {
     return (metrics?.nic || []).reduce((s, n) => s + (n.rx_errors || 0) + (n.tx_errors || 0), 0);
   }
@@ -424,7 +540,9 @@ export function readMetricValue(path, metrics, linkHealth, fault) {
     parts.shift();
     parts[0] = parts[0] === "temperature_celsius" ? "temperature_celsius" : parts.join("_").replace("memory_", "memory_");
     if (path === "gpu.temperature_celsius") return cur.temperature_celsius ?? null;
+    if (path === "gpu.gpu_utilization_percent") return cur.gpu_utilization_percent ?? null;
     if (path === "gpu.memory_utilization_percent") return cur.memory_utilization_percent ?? null;
+    if (path === "gpu.power_draw_watts") return cur.power_draw_watts ?? null;
   }
   if (path === "cpu.usage_percent") return metrics?.cpu?.usage_percent ?? null;
   if (path === "cpu.temperature_celsius") return metrics?.cpu?.temperature_celsius ?? null;

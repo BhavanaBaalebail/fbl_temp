@@ -18,6 +18,9 @@ export function FaultDetectionTab({
   statusPillTone,
   cardStatusTone,
   liveMetrics = null,
+  liveLinkHealth = null,
+  liveInventory = null,
+  onRecoveryComplete,
 }) {
   const [activeFaultModal, setActiveFaultModal] = useState(null);
 
@@ -68,7 +71,7 @@ export function FaultDetectionTab({
         filteredFaultRows={faults.filteredFaultRows}
         activeFaultFilter={faults.activeFaultFilter}
         setActiveFaultFilter={faults.setActiveFaultFilter}
-        setActiveFaultModal={setActiveFaultModal}
+        setActiveFaultModal={(row) => setActiveFaultModal(row)}
         totalFaults={faults.faults?.length ?? 0}
       />
 
@@ -88,6 +91,9 @@ export function FaultDetectionTab({
           fault={liveFaultRow}
           connected={connected}
           liveMetrics={liveMetrics}
+          liveLinkHealth={liveLinkHealth}
+          liveInventory={liveInventory}
+          onRecoveryComplete={onRecoveryComplete}
           onClose={() => setActiveFaultModal(null)}
         />
       )}
@@ -319,7 +325,7 @@ function FaultLogSection({
                       ? "warning"
                       : "healthy";
                 const rowStatus =
-                  row.status === "Auto Recovered"
+                  row.status === "Recovered"
                     ? "healthy"
                     : row.status === "Active"
                       ? "critical"
@@ -369,13 +375,15 @@ function FaultLogSection({
                       <StatusBadge status={rowStatus} label={row.status} />
                     </td>
                     <td>
-                      <button
-                        type="button"
-                        className="text-xs font-medium text-[#38bdf8] transition-colors hover:text-[#22d3ee]"
-                        onClick={() => setActiveFaultModal(row)}
-                      >
-                        {row.action}
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          className="text-xs font-medium text-[#38bdf8] transition-colors hover:text-[#22d3ee]"
+                          onClick={() => setActiveFaultModal(row)}
+                        >
+                          View
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );

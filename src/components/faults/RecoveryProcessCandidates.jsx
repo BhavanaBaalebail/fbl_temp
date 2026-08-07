@@ -15,6 +15,7 @@ import {
   processActionKeysForDomain,
   processCandidatesDomainForFault,
 } from "../../recovery/recoveryProcessDomain";
+import { recordRecoveryExecution } from "../../recovery/recoveryHistoryService";
 import { RecoveryConfirmationDialog } from "./RecoveryConfirmationDialog";
 
 const PANEL = {
@@ -28,7 +29,7 @@ function buildPendingRecommendation(actionKey, candidate, domain) {
   const isResume = actionKey.includes("resume");
   let label = "Pause Process";
   if (isResume) label = "Resume Process";
-  else if (isKill) label = domain === "disk" ? "Terminate Process" : "Kill Process";
+  else if (isKill) label = domain === "disk" || domain === "gpu" || domain === "nic" ? "Terminate Process" : "Kill Process";
 
   return {
     actionId: action?.id || actionKey,
@@ -40,7 +41,11 @@ function buildPendingRecommendation(actionKey, candidate, domain) {
       (isKill
         ? domain === "disk"
           ? "Sends SIGTERM to the selected process."
-          : "Terminates the selected process."
+          : domain === "gpu"
+            ? "Sends SIGTERM to the selected GPU process."
+            : domain === "nic"
+              ? "Sends SIGTERM to the selected network process."
+            : "Terminates the selected process."
         : isResume
           ? "Sends SIGCONT to resume the selected process."
           : "Suspends the selected process."),
@@ -55,6 +60,19 @@ function buildPendingRecommendation(actionKey, candidate, domain) {
 
 function diskUsageEmptyLabel(minPercent) {
   return `No processes at or above ${minPercent} KB/s total disk I/O.`;
+}
+
+function gpuUsageEmptyLabel(minPercent) {
+  return `No GPU processes at or above ${minPercent}% utilization or 64 MB VRAM.`;
+}
+
+function nicUsageEmptyLabel(minPercent) {
+  return `No network processes at or above ${minPercent} KB/s total throughput.`;
+}
+
+function fmtMbps(value) {
+  if (value == null) return "—";
+  return Number(value).toFixed(1);
 }
 
 export function RecoveryProcessCandidates({
@@ -140,6 +158,24 @@ export function RecoveryProcessCandidates({
           ? result.message || "Action completed."
           : result.message || "Action failed on host."
       );
+      recordRecoveryExecution({
+        faultId: fault.id,
+        component: fault.component,
+        metricName: fault.metricName,
+        result: result.success ? "success" : "failed",
+        selectedAction: {
+          actionId: recommendation.actionId,
+          label: recommendation.label,
+          level: recommendation.level,
+        },
+        params: recommendation.params,
+        confirmationGiven: true,
+        commandExecuted: recommendation.backendAction,
+        commandOutput: result,
+        verificationOutcome: result.message || (result.success ? "Process action completed." : "Process action failed."),
+        reason: result.message || recommendation.impact,
+        timestamp: new Date().toISOString(),
+      });
       await refresh();
       onActionComplete?.(result);
     } catch (err) {
@@ -162,9 +198,13 @@ export function RecoveryProcessCandidates({
   const emptyLabel =
     domain === "disk"
       ? diskUsageEmptyLabel(meta?.min_percent ?? minPercent)
-      : `No processes at or above ${meta?.min_percent ?? minPercent}% ${domain === "gpu" ? "GPU" : "CPU"} usage.`;
+      : domain === "gpu"
+        ? gpuUsageEmptyLabel(meta?.min_percent ?? minPercent)
+        : domain === "nic"
+          ? nicUsageEmptyLabel(meta?.min_percent ?? minPercent)
+        : `No processes at or above ${meta?.min_percent ?? minPercent}% ${domain === "gpu" ? "GPU" : "CPU"} usage.`;
 
-  const terminateLabel = domain === "disk" ? "Terminate" : "Kill";
+  const terminateLabel = domain === "disk" || domain === "gpu" || domain === "nic" ? "Terminate" : "Kill";
 
   return (
     <>
@@ -186,6 +226,164 @@ export function RecoveryProcessCandidates({
         </p>
       ) : candidates.length === 0 ? (
         <p className="text-sm text-[#64748b]">{emptyLabel}</p>
+      ) : domain === "gpu" ? (
+        <div className="hw-table-wrap overflow-x-auto">
+          <table className="hw-table min-w-full text-xs">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Process</th>
+                <th className="text-right">GPU %</th>
+                <th className="text-right">VRAM MB</th>
+                <th className="text-right">CPU %</th>
+                <th className="text-right">Mem %</th>
+                <th>User</th>
+                <th className="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((row) => {
+                const busy = executingPid === row.pid;
+                const pauseDisabled = !row.recoverable || !pauseSupported || busy;
+                const resumeDisabled = !row.recoverable || !resumeSupported || busy;
+                const killDisabled = !row.recoverable || !killSupported || busy;
+                const tip = !row.recoverable ? row.reason || "Not recoverable" : undefined;
+                return (
+                  <tr key={row.pid}>
+                    <td className="font-mono-metrics">{row.pid}</td>
+                    <td className="max-w-[220px] truncate" title={candidateCommandLine(row)}>
+                      {candidateCommandLine(row)}
+                    </td>
+                    <td className="text-right font-mono-metrics">
+                      {row.gpu_compute_percent ?? "—"}
+                    </td>
+                    <td className="text-right font-mono-metrics">
+                      {row.gpu_memory_mb ?? row.gpu_memory_percent ?? "—"}
+                    </td>
+                    <td className="text-right font-mono-metrics">{row.cpu_percent ?? "—"}</td>
+                    <td className="text-right font-mono-metrics">{row.memory_percent ?? "—"}</td>
+                    <td>{row.user || "—"}</td>
+                    <td className="text-right">
+                      <div className="flex justify-end gap-1.5">
+                        <button
+                          type="button"
+                          className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                          disabled={pauseDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.pause, row)}
+                        >
+                          Pause
+                        </button>
+                        {actionKeys.resume && (
+                          <button
+                            type="button"
+                            className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                            disabled={resumeDisabled}
+                            title={tip}
+                            onClick={() => requestAction(actionKeys.resume, row)}
+                          >
+                            Resume
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-40"
+                          style={{ background: killDisabled ? "#475569" : "#b91c1c" }}
+                          disabled={killDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.kill, row)}
+                        >
+                          {terminateLabel}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : domain === "nic" ? (
+        <div className="hw-table-wrap-scroll">
+          <table className="hw-table hw-table-sticky-actions min-w-full text-xs">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Process</th>
+                <th>User</th>
+                <th className="text-right">RX Mbps</th>
+                <th className="text-right">TX Mbps</th>
+                <th className="text-right">CPU %</th>
+                <th className="text-right">Mem %</th>
+                <th className="text-right whitespace-nowrap">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((row) => {
+                const busy = executingPid === row.pid;
+                const pauseDisabled = !row.recoverable || !pauseSupported || busy;
+                const resumeDisabled = !row.recoverable || !resumeSupported || busy;
+                const killDisabled = !row.recoverable || !killSupported || busy;
+                const tip = !row.recoverable ? row.reason || "Not recoverable" : undefined;
+                const executable = row.command || row.program || candidateCommandLine(row);
+                const processTitle = executable !== candidateCommandLine(row)
+                  ? `${candidateCommandLine(row)}\n${executable}`
+                  : candidateCommandLine(row);
+                return (
+                  <tr key={row.pid}>
+                    <td className="font-mono-metrics">{row.pid}</td>
+                    <td className="max-w-[200px] truncate" title={processTitle}>
+                      {candidateCommandLine(row)}
+                    </td>
+                    <td>{row.user || "—"}</td>
+                    <td className="text-right font-mono-metrics">
+                      {fmtMbps(row.rx_mbps ?? (row.received_kbps != null ? (row.received_kbps * 8) / 1000 : null))}
+                    </td>
+                    <td className="text-right font-mono-metrics">
+                      {fmtMbps(row.tx_mbps ?? (row.sent_kbps != null ? (row.sent_kbps * 8) / 1000 : null))}
+                    </td>
+                    <td className="text-right font-mono-metrics">{row.cpu_percent ?? "—"}</td>
+                    <td className="text-right font-mono-metrics">{row.memory_percent ?? "—"}</td>
+                    <td className="text-right whitespace-nowrap">
+                      <div className="flex justify-end gap-1.5">
+                        <button
+                          type="button"
+                          className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                          disabled={pauseDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.pause, row)}
+                        >
+                          Pause
+                        </button>
+                        {actionKeys.resume && (
+                          <button
+                            type="button"
+                            className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                            disabled={resumeDisabled}
+                            title={tip}
+                            onClick={() => requestAction(actionKeys.resume, row)}
+                          >
+                            Resume
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-40"
+                          style={{ background: killDisabled ? "#475569" : "#b91c1c" }}
+                          disabled={killDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.kill, row)}
+                        >
+                          {terminateLabel}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : domain === "disk" ? (
         <div className="hw-table-wrap overflow-x-auto">
           <table className="hw-table min-w-full text-xs">

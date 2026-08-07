@@ -407,6 +407,34 @@ body {
   background: rgba(8, 12, 18, 0.5);
 }
 
+.hw-table-wrap-scroll {
+  border-radius: 8px;
+  border: 1px solid rgba(34, 211, 238, 0.1);
+  background: rgba(8, 12, 18, 0.5);
+  overflow-x: auto;
+  overflow-y: visible;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+.hw-table-wrap-scroll .hw-table {
+  min-width: max-content;
+}
+
+.hw-table-sticky-actions th:last-child,
+.hw-table-sticky-actions td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: rgba(8, 12, 18, 0.98);
+  box-shadow: -8px 0 12px rgba(0, 0, 0, 0.35);
+  min-width: 11rem;
+}
+
+.hw-table-sticky-actions thead th:last-child {
+  background: rgba(12, 18, 28, 0.98);
+}
+
 /* ── Sidebar rows ── */
 .component-row {
   border-left: 2px solid transparent;

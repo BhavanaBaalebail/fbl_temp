@@ -92,6 +92,36 @@ was removed):
   * Previous-cycle sample caches (_PREV_NIC_STATS, _PREV_DISK_STATS)
     guarded by _metrics_delta_lock; first sample returns null rates.
 
+Trial6 changes (additive only -- nothing from Trial1/Trial2/Trial3/Trial4/
+Trial5 was removed):
+  * NIC PROCESS ATTRIBUTION + NIC SELF-HEALING: get_top_nic_processes()
+    ranks whatever process is actually pushing the most bytes through the
+    NIC right now (sent+received KB/s), using `nethogs -t -c 1` for
+    per-process bandwidth attribution -- the NIC-domain equivalent of the
+    existing get_top_cpu_processes()/get_top_disk_io_processes(). It is
+    deliberately tool-agnostic: it doesn't special-case iperf3 (or any
+    other traffic generator/offender) -- it ranks by observed bandwidth,
+    so it self-heals ANY NIC-saturating process, not just one specific
+    tool. get_recovery_process_candidates() gained a "nic" domain that
+    reuses this ranking (mirroring the existing cpu/gpu/disk domains) so
+    the frontend can list every meaningful network consumer, not just the
+    single biggest one.
+  * Four new whitelisted recovery actions -- nic.pause_process (SIGSTOP),
+    nic.resume_process (SIGCONT), nic.terminate_process (SIGTERM, verified
+    gone), nic.kill_process (unconditional kill -9, verified gone) -- are
+    registered in RECOVERY_ACTIONS alongside the existing interface-level
+    NIC actions (nic.restart_interface, nic.renew_dhcp,
+    nic.restart_network_manager, nic.reload_driver). Together this gives
+    NIC recovery the same two tiers CPU/GPU/RAM/Disk already have:
+    process-level (pause/resume/terminate/kill the offending PID) and
+    subsystem-level (restart/renew/reload the interface itself). All four
+    go through the exact same validate_pid()/_recovery_signal()/
+    _recovery_force_kill() machinery already used by cpu.*/ram.*/gpu.*/
+    disk.* -- no new validation or execution code paths were introduced.
+  * collect_metrics()'s "top_processes" block gained a "nic" key
+    (get_top_nic_processes(limit=20)), matching the existing cpu/gpu/disk
+    keys, and /recovery/process_candidates now accepts domain=nic.
+
 Run:
     pip install -r requirements.txt
     python3 collect_metrics2_Trial2.py
@@ -153,7 +183,7 @@ _AER_FILES = ["aer_dev_correctable", "aer_dev_nonfatal", "aer_dev_fatal"]
 INSTALL_HINT = (
     "sudo apt install dmidecode lm-sensors ipmitool smartmontools nvme-cli "
     "lsscsi ethtool pciutils i2c-tools rdma-core tpm2-tools lshw hdparm fwupd "
-    "msr-tools"
+    "msr-tools nethogs"
 )
 
 logging.basicConfig(
@@ -179,6 +209,7 @@ _CMD_CACHE: dict[tuple, str] = {}
 # Trial5: previous-sample state for delta-based live performance metrics
 _metrics_delta_lock = threading.Lock()
 _PREV_NIC_STATS: dict[str, dict[str, Any]] = {}
+_LATEST_NIC_METRICS: list[dict[str, Any]] = []
 _PREV_DISK_STATS: dict[str, dict[str, Any]] = {}
 
 
@@ -416,7 +447,10 @@ def _inject_nic_metrics(metrics: dict[str, Any]) -> None:
         primary["tx_dropped"] = _lerp_int(0, 50, t)
         primary["tx_errors"] = _lerp_int(0, 40, t)
         primary["duplex"] = "Full"
-        primary["speed"] = "100Mb/s" if t > 0.5 else primary.get("speed")
+        demo_speed = "100Mb/s" if t > 0.5 else primary.get("speed_str") or primary.get("speed")
+        primary["speed_str"] = demo_speed if isinstance(demo_speed, str) else primary.get("speed_str")
+        primary["speed_mbps"] = _parse_link_speed_to_mbps(primary.get("speed_str")) or primary.get("speed_mbps")
+        primary["speed"] = primary["speed_mbps"] if primary.get("speed_mbps") is not None else demo_speed
         primary["link_state"] = "up"
 
     elif severity == "critical":
@@ -425,7 +459,9 @@ def _inject_nic_metrics(metrics: dict[str, Any]) -> None:
         primary["tx_dropped"] = _lerp_int(50, 800, t)
         primary["tx_errors"] = _lerp_int(40, 600, t)
         primary["duplex"] = "Half"
-        primary["speed"] = "10Mb/s"
+        primary["speed_str"] = "10Mb/s"
+        primary["speed_mbps"] = 10.0
+        primary["speed"] = 10.0
         primary["link_state"] = "down" if t >= 0.85 else "up"
 
 
@@ -1338,7 +1374,7 @@ def get_nic_inventory() -> list[dict[str, Any]]:
 def _parse_link_speed_to_bps(speed_str: Optional[str]) -> Optional[float]:
     if not speed_str:
         return None
-    m = re.match(r"(\d+)\s*([A-Za-z]+)/s", speed_str.strip())
+    m = re.match(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)/s", speed_str.strip())
     if not m:
         return None
     value = safe_float(m.group(1))
@@ -1350,6 +1386,127 @@ def _parse_link_speed_to_bps(speed_str: Optional[str]) -> Optional[float]:
     if mult is None:
         return None
     return value * mult
+
+
+def _parse_link_speed_to_mbps(speed_str: Optional[str]) -> Optional[float]:
+    bps = _parse_link_speed_to_bps(speed_str)
+    if bps is None:
+        return None
+    return round(bps / 1_000_000, 3)
+
+
+def _is_wireless_interface(iface: str) -> bool:
+    if not iface:
+        return False
+    if (NET_CLASS_PATH / iface / "wireless").exists():
+        return True
+    lower = iface.lower()
+    return lower.startswith(("wl", "wlan", "wifi"))
+
+
+def _read_sysfs_link_speed_mbps(iface: str) -> Optional[float]:
+    raw = read_stripped(NET_CLASS_PATH / iface / "speed")
+    if not raw:
+        return None
+    value = safe_int(raw)
+    if value is None or value <= 0:
+        return None
+    return float(value)
+
+
+def _get_wifi_link_speed_mbps(iface: str) -> Optional[float]:
+    """Resolve Wi-Fi negotiated bitrate via iw, then iwconfig."""
+    if command_exists("iw"):
+        out = run(["iw", "dev", iface, "link"], use_cache=False)
+        if out.strip():
+            for pattern in (
+                r"tx bitrate:\s*([\d.]+)\s*MBit/s",
+                r"rx bitrate:\s*([\d.]+)\s*MBit/s",
+                r"bitrate:\s*([\d.]+)\s*MBit/s",
+            ):
+                m = re.search(pattern, out, re.IGNORECASE)
+                if m:
+                    value = safe_float(m.group(1))
+                    if value is not None and value > 0:
+                        return round(value, 3)
+
+    if command_exists("iwconfig"):
+        out = run(["iwconfig", iface], use_cache=False)
+        if out.strip():
+            m = re.search(r"Bit Rate[=:\s]+([\d.]+)\s*Mb/?s", out, re.IGNORECASE)
+            if m:
+                value = safe_float(m.group(1))
+                if value is not None and value > 0:
+                    return round(value, 3)
+
+    return None
+
+
+def _resolve_nic_link_speed(
+    iface: str,
+    ethtool_speed_str: Optional[str],
+) -> tuple[Optional[float], Optional[str], Optional[float]]:
+    """Return (link_speed_bps, speed_display_str, speed_mbps).
+
+    Ethernet: ethtool → sysfs.  Wi-Fi: ethtool → sysfs → iw → iwconfig.
+    """
+    speed_str = ethtool_speed_str
+    speed_mbps = _parse_link_speed_to_mbps(speed_str)
+
+    if speed_mbps is None:
+        speed_mbps = _read_sysfs_link_speed_mbps(iface)
+        if speed_mbps is not None and not speed_str:
+            speed_str = f"{speed_mbps:g}Mb/s"
+
+    if speed_mbps is None and _is_wireless_interface(iface):
+        speed_mbps = _get_wifi_link_speed_mbps(iface)
+        if speed_mbps is not None:
+            speed_str = speed_str or f"{speed_mbps:g}Mb/s"
+
+    if speed_mbps is None:
+        return None, speed_str, None
+
+    return speed_mbps * 1_000_000, speed_str, speed_mbps
+
+
+def _clamp_utilization_percent(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(max(0.0, min(100.0, value)), 3)
+
+
+NIC_UTILIZATION_WARNING_PERCENT = 10.0  # TESTING ONLY — revert to 70.0 for production
+NIC_UTILIZATION_CRITICAL_PERCENT = 20.0  # TESTING ONLY — revert to 80.0 for production
+
+
+def _kbps_to_mbps(kbps: float) -> float:
+    return round((kbps or 0.0) * 8 / 1000.0, 2)
+
+
+def _nic_utilization_threshold_fields(util_pct: Optional[float]) -> dict[str, Any]:
+    if util_pct is None:
+        return {
+            "utilization_threshold_status": None,
+            "utilization_threshold_severity": None,
+            "utilization_threshold_crossed": None,
+        }
+    if util_pct >= NIC_UTILIZATION_CRITICAL_PERCENT:
+        return {
+            "utilization_threshold_status": "critical",
+            "utilization_threshold_severity": "Critical",
+            "utilization_threshold_crossed": f"≥ {NIC_UTILIZATION_CRITICAL_PERCENT:g}% (Critical)",
+        }
+    if util_pct >= NIC_UTILIZATION_WARNING_PERCENT:
+        return {
+            "utilization_threshold_status": "warning",
+            "utilization_threshold_severity": "Warning",
+            "utilization_threshold_crossed": f"≥ {NIC_UTILIZATION_WARNING_PERCENT:g}% (Warning)",
+        }
+    return {
+        "utilization_threshold_status": "healthy",
+        "utilization_threshold_severity": None,
+        "utilization_threshold_crossed": None,
+    }
 
 
 @safe_collect("nic_delta_metrics", fallback={})
@@ -1369,10 +1526,13 @@ def _compute_nic_delta_metrics(
         "tx_bytes_per_sec": None,
         "rx_MB_per_sec": None,
         "tx_MB_per_sec": None,
+        "rx_mbps": None,
+        "tx_mbps": None,
         "rx_packets_per_sec": None,
         "tx_packets_per_sec": None,
         "rx_utilization_percent": None,
         "tx_utilization_percent": None,
+        "utilization_percent": None,
         "rx_drop_rate_percent": None,
         "tx_drop_rate_percent": None,
         "rx_error_rate_percent": None,
@@ -1412,15 +1572,28 @@ def _compute_nic_delta_metrics(
             rx_bps = d_rx_bytes / dt
             result["rx_bytes_per_sec"] = round(rx_bps, 2)
             result["rx_MB_per_sec"] = round(rx_bps / (1024 ** 2), 4)
+            result["rx_mbps"] = round((result["rx_MB_per_sec"] or 0) * 8, 3)
             if link_speed_bps:
-                result["rx_utilization_percent"] = round((rx_bps * 8) / link_speed_bps * 100, 3)
+                result["rx_utilization_percent"] = _clamp_utilization_percent(
+                    (rx_bps * 8) / link_speed_bps * 100
+                )
 
         if d_tx_bytes is not None:
             tx_bps = d_tx_bytes / dt
             result["tx_bytes_per_sec"] = round(tx_bps, 2)
             result["tx_MB_per_sec"] = round(tx_bps / (1024 ** 2), 4)
+            result["tx_mbps"] = round((result["tx_MB_per_sec"] or 0) * 8, 3)
             if link_speed_bps:
-                result["tx_utilization_percent"] = round((tx_bps * 8) / link_speed_bps * 100, 3)
+                result["tx_utilization_percent"] = _clamp_utilization_percent(
+                    (tx_bps * 8) / link_speed_bps * 100
+                )
+
+        if link_speed_bps and (result["rx_MB_per_sec"] is not None or result["tx_MB_per_sec"] is not None):
+            total_mb_per_sec = (result["rx_MB_per_sec"] or 0) + (result["tx_MB_per_sec"] or 0)
+            total_mbps = total_mb_per_sec * 8
+            result["utilization_percent"] = _clamp_utilization_percent(
+                (total_mbps * 1_000_000) / link_speed_bps * 100
+            )
 
         if d_rx_packets is not None:
             result["rx_packets_per_sec"] = round(d_rx_packets / dt, 2)
@@ -1488,11 +1661,14 @@ def get_nic_metrics() -> list[dict[str, Any]]:
 
         s = stats.get(iface, {})
         speed_str = get_value(r"Speed:\s+(\S+)", ethtool_out)
+        link_speed_bps, resolved_speed_str, speed_mbps = _resolve_nic_link_speed(iface, speed_str)
 
         entry = {
             "name": iface,
             "link_state": link_state,
-            "speed": speed_str,
+            "speed": speed_mbps if speed_mbps is not None else speed_str,
+            "speed_str": resolved_speed_str or speed_str,
+            "speed_mbps": speed_mbps,
             "duplex": get_value(r"Duplex:\s+(\S+)", ethtool_out),
             "rx_bytes": s.get("rx_bytes"),
             "tx_bytes": s.get("tx_bytes"),
@@ -1502,13 +1678,15 @@ def get_nic_metrics() -> list[dict[str, Any]]:
             "tx_errors": s.get("tx_errors"),
             "rx_dropped": s.get("rx_dropped"),
             "tx_dropped": s.get("tx_dropped"),
+            "wireless": _is_wireless_interface(iface),
         }
 
-        link_speed_bps = _parse_link_speed_to_bps(speed_str)
         entry.update(_compute_nic_delta_metrics(iface, s, link_speed_bps, time.time()))
-
+        entry.update(_nic_utilization_threshold_fields(entry.get("utilization_percent")))
         results.append(entry)
 
+    global _LATEST_NIC_METRICS
+    _LATEST_NIC_METRICS = results
     return results
 
 
@@ -1775,7 +1953,7 @@ def get_top_disk_io_processes(limit: int = 50) -> list[dict[str, Any]]:
 
 
 def _enrich_disk_io_process_meta(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach ps user/cpu/mem fields to pidstat rows when missing."""
+    """Attach ps user/cpu/mem fields to pidstat/nethogs rows when missing."""
     if not processes:
         return processes
     pids = {p["pid"] for p in processes if p.get("pid") is not None}
@@ -1810,6 +1988,45 @@ def _enrich_disk_io_process_meta(processes: list[dict[str, Any]]) -> list[dict[s
             "command": proc.get("command") or m.get("command"),
         })
     return enriched
+
+
+def _enrich_gpu_process_meta(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach ps user/cpu/mem fields to nvidia-smi process rows when missing."""
+    if not processes:
+        return processes
+    pids = {p["pid"] for p in processes if p.get("pid") is not None}
+    if not pids:
+        return processes
+    ps_out = run(["ps", "-eo", "pid,user,%cpu,%mem,comm,args"])
+    meta: dict[int, dict[str, Any]] = {}
+    for line in ps_out.splitlines()[1:]:
+        parts = line.split(None, 6)
+        if len(parts) < 7:
+            continue
+        pid = safe_int(parts[0])
+        if pid is None or pid not in pids:
+            continue
+        meta[pid] = {
+            "user": parts[1],
+            "cpu_percent": safe_float(parts[2]),
+            "memory_percent": safe_float(parts[3]),
+            "process": parts[5],
+            "command": parts[6],
+        }
+    enriched: list[dict[str, Any]] = []
+    for proc in processes:
+        pid = proc.get("pid")
+        m = meta.get(pid, {})
+        enriched.append({
+            **proc,
+            "user": proc.get("user") or m.get("user"),
+            "cpu_percent": proc.get("cpu_percent") if proc.get("cpu_percent") is not None else m.get("cpu_percent"),
+            "memory_percent": proc.get("memory_percent") if proc.get("memory_percent") is not None else m.get("memory_percent"),
+            "process": proc.get("process") or m.get("process"),
+            "command": proc.get("command") or m.get("command"),
+        })
+    return enriched
+
 
 @safe_collect("gpu_processes", fallback=[])
 def get_gpu_processes() -> list[dict[str, Any]]:
@@ -1899,7 +2116,7 @@ def get_gpu_processes() -> list[dict[str, Any]]:
             })
 
         if processes:
-            return processes
+            return _enrich_gpu_process_meta(processes)
 
     # ---------------------------------------------------
     # STEP 2 : Fallback
@@ -1930,7 +2147,603 @@ def get_gpu_processes() -> list[dict[str, Any]]:
             "gpu_memory_mb": safe_int(fields[2]),
         })
 
-    return processes
+    return _enrich_gpu_process_meta(processes)
+
+
+# --------------------------------------------------------------------------
+# Trial6: NIC PROCESS ATTRIBUTION (top per-process network consumers)
+# --------------------------------------------------------------------------
+
+_NIC_PROC_LINE_RE = re.compile(
+    r"^(?P<program>.+)/(?P<pid>\d+)/(?P<uid>\d+)\s+(?P<sent>[\d.]+)\s+(?P<recv>[\d.]+)"
+)
+
+
+@safe_collect("top_nic_processes", fallback=[])
+def get_top_nic_processes(limit: int = 50) -> list[dict[str, Any]]:
+    """Top per-process network bandwidth consumers, ranked by combined
+    sent+received KB/s -- the NIC-domain equivalent of
+    get_top_cpu_processes()/get_top_disk_io_processes().
+
+    Primary source: nethogs (live KB/s per PID). When nethogs is
+    unavailable, falls back to pgrep/ss socket-owner discovery so recovery
+    can still target the workload PID (rates may read 0 until nethogs works).
+    """
+    results: list[dict[str, Any]] = []
+
+    if command_exists("nethogs"):
+        out = run(["sudo", "-n", "nethogs", "-t", "-c", "2"], timeout=LONG_TIMEOUT, use_cache=False)
+        if out.strip():
+            for line in out.splitlines():
+                line = line.strip()
+                if not line or line.lower().startswith(("refreshing", "nethogs")):
+                    continue
+                m = _NIC_PROC_LINE_RE.match(line)
+                if not m:
+                    continue
+
+                pid = safe_int(m.group("pid"))
+                if pid is None or pid == 0:
+                    continue
+
+                sent_kbps = safe_float(m.group("sent")) or 0.0
+                recv_kbps = safe_float(m.group("recv")) or 0.0
+                program = m.group("program").strip()
+
+                results.append({
+                    "pid": pid,
+                    "program": program,
+                    "process": program.rsplit("/", 1)[-1] if program else None,
+                    "sent_kbps": round(sent_kbps, 2),
+                    "received_kbps": round(recv_kbps, 2),
+                    "total_kbps": round(sent_kbps + recv_kbps, 2),
+                    "rx_mbps": _kbps_to_mbps(recv_kbps),
+                    "tx_mbps": _kbps_to_mbps(sent_kbps),
+                    "total_mbps": _kbps_to_mbps(sent_kbps + recv_kbps),
+                    "source": "nethogs",
+                })
+
+    if results:
+        by_pid: dict[int, dict[str, Any]] = {}
+        for entry in results:
+            existing = by_pid.get(entry["pid"])
+            if existing is None or entry["total_kbps"] > existing["total_kbps"]:
+                by_pid[entry["pid"]] = entry
+        merged = sorted(by_pid.values(), key=lambda p: p["total_kbps"], reverse=True)
+        return _enrich_disk_io_process_meta(merged[:limit])
+
+    return _nic_processes_pid_fallback(limit)
+
+# ============================================================================
+# TRIAL 7 PATCH -- paste this whole block into collect_metrics_final.py
+# right after the existing "Trial6: NIC PROCESS ATTRIBUTION" section
+# (i.e. right before `def collect_metrics() -> dict[str, Any]:`).
+#
+# It depends only on things that already exist earlier in that file:
+#   run(), safe_int(), safe_float(), read_file(), read_stripped(),
+#   command_exists(), logger, safe_collect, NET_CLASS_PATH, LONG_TIMEOUT,
+#   get_top_nic_processes(), get_nic_metrics(), _get_kernel_log(),
+#   _nic_kill_process/_nic_restart_interface/_nic_reload_driver/
+#   _nic_renew_dhcp/_nic_restart_network_manager, validate_pid(),
+#   validate_interface(), record_recovery_history()
+#
+# See the bottom of this file for the 3 small edits needed elsewhere in
+# collect_metrics_final.py to wire this in.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Part 1: process-agnostic NIC process attribution (nethogs -> ss -tpn ->
+# lsof -i -> /proc/<pid>/fd + /proc/net -> netstat -p)
+# ----------------------------------------------------------------------------
+
+def _network_process_entry(pid: int, user, process, command,
+                            rx_mbps: float = None, tx_mbps: float = None) -> dict:
+    rx = round(rx_mbps, 2) if rx_mbps is not None else 0.0
+    tx = round(tx_mbps, 2) if tx_mbps is not None else 0.0
+    return {
+        "pid": pid,
+        "user": user,
+        "process": process,
+        "command": command,
+        "rx_mbps": rx,
+        "tx_mbps": tx,
+        "total_mbps": round(rx + tx, 2),
+    }
+
+
+def _network_processes_via_nethogs(limit: int) -> list:
+    """Source 1 (highest priority): nethogs gives real per-PID KB/s, which
+    we convert to the spec's Mb/s. Reuses the existing Trial6 collector
+    instead of shelling out to nethogs a second time."""
+    nic_procs = get_top_nic_processes(limit=limit)
+    if not nic_procs:
+        return []
+    results = []
+    for p in nic_procs:
+        rx_mbps = (p.get("received_kbps") or 0.0) * 8 / 1000.0
+        tx_mbps = (p.get("sent_kbps") or 0.0) * 8 / 1000.0
+        results.append(_network_process_entry(
+            pid=p.get("pid"), user=p.get("user"), process=p.get("process"),
+            command=p.get("command"), rx_mbps=rx_mbps, tx_mbps=tx_mbps,
+        ))
+    return results
+
+
+_SS_PID_RE = re.compile(r'users:\(\("(?P<proc>[^"]+)",pid=(?P<pid>\d+)')
+
+
+def _network_processes_via_ss(limit: int) -> list:
+    """Source 2: `ss -tpn` identifies the owning PID of each TCP socket.
+    No live byte rate is available this way, so rx_mbps/tx_mbps come back
+    as 0.0 -- still enough to know a dominant process exists."""
+    if not command_exists("ss"):
+        return []
+    out = run(["ss", "-tpn"], use_cache=False)
+    if not out.strip():
+        return []
+    pid_to_proc = {}
+    for line in out.splitlines():
+        m = _SS_PID_RE.search(line)
+        if not m:
+            continue
+        pid = safe_int(m.group("pid"))
+        if pid:
+            pid_to_proc[pid] = m.group("proc")
+    return _enrich_network_pids(pid_to_proc, limit) if pid_to_proc else []
+
+
+_LSOF_PID_RE = re.compile(r"^(?P<proc>\S+)\s+(?P<pid>\d+)\s")
+
+
+def _network_processes_via_lsof(limit: int) -> list:
+    """Source 3: `lsof -i` -- same PID-only limitation as ss."""
+    if not command_exists("lsof"):
+        return []
+    out = run(["sudo", "-n", "lsof", "-i", "-n", "-P"], use_cache=False, timeout=LONG_TIMEOUT)
+    if not out.strip():
+        return []
+    pid_to_proc = {}
+    for line in out.splitlines()[1:]:  # skip header row
+        m = _LSOF_PID_RE.match(line)
+        if not m:
+            continue
+        pid = safe_int(m.group("pid"))
+        if pid:
+            pid_to_proc[pid] = m.group("proc")
+    return _enrich_network_pids(pid_to_proc, limit) if pid_to_proc else []
+
+
+def _network_processes_via_proc_net(limit: int) -> list:
+    """Source 4: cross-reference /proc/net/{tcp,udp,tcp6,udp6} socket
+    inodes against every process's /proc/<pid>/fd symlinks
+    ("socket:[<inode>]"). Needs no external tool at all, so it's the
+    last resort that's always available on any Linux box."""
+    inode_files = ("/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6")
+    active_inodes = set()
+    for f in inode_files:
+        for line in read_file(f).splitlines()[1:]:
+            parts = line.split()
+            if len(parts) > 9 and parts[9] not in ("", "0"):
+                active_inodes.add(parts[9])
+    if not active_inodes:
+        return []
+
+    pid_to_proc = {}
+    try:
+        pid_dirs = [d for d in os.listdir("/proc") if d.isdigit()]
+    except Exception:
+        return []
+
+    for pid_str in pid_dirs:
+        fd_dir = Path(f"/proc/{pid_str}/fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except Exception:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd_dir / fd)
+            except Exception:
+                continue
+            m = re.match(r"socket:\[(\d+)\]", target)
+            if m and m.group(1) in active_inodes:
+                pid = safe_int(pid_str)
+                if pid:
+                    pid_to_proc[pid] = read_stripped(f"/proc/{pid_str}/comm")
+                break
+
+    return _enrich_network_pids(pid_to_proc, limit) if pid_to_proc else []
+
+
+_NETSTAT_PID_RE = re.compile(r"(?P<pid>\d+)/(?P<proc>\S+)\s*$")
+
+
+def _network_processes_via_netstat(limit: int) -> list:
+    """Source 5 (last resort): `netstat -p`."""
+    if not command_exists("netstat"):
+        return []
+    out = run(["sudo", "-n", "netstat", "-tpn"], use_cache=False)
+    if not out.strip():
+        return []
+    pid_to_proc = {}
+    for line in out.splitlines():
+        m = _NETSTAT_PID_RE.search(line)
+        if not m:
+            continue
+        pid = safe_int(m.group("pid"))
+        if pid:
+            pid_to_proc[pid] = m.group("proc")
+    return _enrich_network_pids(pid_to_proc, limit) if pid_to_proc else []
+
+
+def _enrich_network_pids(pid_to_proc: dict, limit: int) -> list:
+    """Turn a bare {pid: process_name} map (sources 2-5, none of which
+    give a live rate) into entries matching get_top_network_processes()'s
+    schema, filling in user/command from `ps`."""
+    ps_out = run(["ps", "-eo", "pid,user,args"])
+    meta = {}
+    for line in ps_out.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) < 2:
+            continue
+        pid = safe_int(parts[0])
+        if pid is None or pid not in pid_to_proc:
+            continue
+        meta[pid] = {"user": parts[1], "command": parts[2] if len(parts) > 2 else None}
+
+    results = []
+    for pid, proc_name in pid_to_proc.items():
+        m = meta.get(pid, {})
+        results.append(_network_process_entry(
+            pid=pid, user=m.get("user"), process=proc_name,
+            command=m.get("command") or proc_name,
+        ))
+    return results[:limit]
+
+
+def _nic_processes_pid_fallback(limit: int) -> list[dict[str, Any]]:
+    """Discover network workload PIDs when nethogs cannot attribute rates.
+
+    Uses pgrep -a (e.g. iperf3) and ss -tpn socket owners. Rates are 0
+    until nethogs is available, but PID/command are real for recovery actions.
+    """
+    by_pid: dict[int, dict[str, Any]] = {}
+
+    def _add(pid: Optional[int], process: Optional[str], command: Optional[str], source: str) -> None:
+        if pid is None or pid <= 0:
+            return
+        proc_name = (process or "").rsplit("/", 1)[-1] if process else None
+        by_pid[pid] = {
+            "pid": pid,
+            "program": process or proc_name,
+            "process": proc_name or process,
+            "command": command or process or proc_name,
+            "sent_kbps": 0.0,
+            "received_kbps": 0.0,
+            "total_kbps": 0.0,
+            "rx_mbps": 0.0,
+            "tx_mbps": 0.0,
+            "total_mbps": 0.0,
+            "source": source,
+        }
+
+    if command_exists("pgrep"):
+        for name in ("iperf3", "iperf", "curl", "wget", "rsync", "scp", "ssh"):
+            out = run(["pgrep", "-a", name], use_cache=False)
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(None, 1)
+                pid = safe_int(parts[0])
+                cmd = parts[1].strip() if len(parts) > 1 else name
+                _add(pid, name, cmd, "pgrep")
+
+    if command_exists("ss"):
+        out = run(["ss", "-tpn"], use_cache=False)
+        for line in out.splitlines():
+            m = _SS_PID_RE.search(line)
+            if not m:
+                continue
+            pid = safe_int(m.group("pid"))
+            if pid and pid not in by_pid:
+                _add(pid, m.group("proc"), None, "ss")
+
+    if not by_pid:
+        return []
+
+    pgrep_entries = [p for p in by_pid.values() if p.get("source") == "pgrep"]
+    if pgrep_entries:
+        merged = sorted(pgrep_entries, key=lambda p: p.get("pid") or 0)
+        return _enrich_disk_io_process_meta(merged[:limit])
+
+    ss_entries = [p for p in by_pid.values() if p.get("source") == "ss"]
+    merged = sorted(ss_entries, key=lambda p: p.get("pid") or 0)
+    return _enrich_disk_io_process_meta(merged[:limit])
+
+
+def _network_processes_have_rates(results: list) -> bool:
+    return any((p.get("total_mbps") or 0) > 0 for p in results)
+
+
+@safe_collect("top_network_processes", fallback=[])
+def get_top_network_processes(limit: int = 50) -> list:
+    """Part 1 of the NIC self-healing upgrade spec: process-agnostic
+    network-bandwidth attribution. Tries, in order:
+        nethogs -> ss -tpn -> lsof -i -> /proc/<pid>/fd + /proc/net ->
+        netstat -p
+    and returns the first source that yields data with live rates when
+    available. Returns [] (never raises) if none are available.
+
+    Deliberately a *sibling* to get_top_nic_processes() (Trial6), not a
+    replacement -- that function's KB/s schema stays exactly as-is for
+    its existing callers (the "nic" recovery-candidates domain, the
+    nic.pause/resume/terminate/kill_process actions). This one implements
+    the fallback chain and rx_mbps/tx_mbps schema the spec asks for, and
+    backs both the new top_processes["network"] key and the automated
+    decision engine below.
+    """
+    for source_fn in (
+        _network_processes_via_nethogs,
+        _network_processes_via_ss,
+        _network_processes_via_lsof,
+        _network_processes_via_proc_net,
+        _network_processes_via_netstat,
+    ):
+        try:
+            results = source_fn(limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("network process source %s failed: %s", source_fn.__name__, exc)
+            continue
+        if not results:
+            continue
+        if source_fn is _network_processes_via_nethogs or _network_processes_have_rates(results):
+            return sorted(results, key=lambda p: p.get("total_mbps") or 0, reverse=True)
+    return []
+
+
+# ----------------------------------------------------------------------------
+# Parts 3-6: automated NIC self-healing decision engine
+# ----------------------------------------------------------------------------
+
+# Configurable thresholds (Part 6: nothing here is hardcoded to a
+# particular tool -- these are pure numeric knobs).
+NIC_DOMINANT_PROCESS_PERCENT = 60.0       # % of total attributed Mb/s owned by one PID
+NIC_WATCHDOG_LOG_PATTERN = re.compile(r"NETDEV WATCHDOG|Transmit timeout", re.IGNORECASE)
+NIC_ESCALATION_SETTLE_SECONDS = 2.0
+
+
+def _nic_primary_metrics(iface: str) -> dict:
+    for entry in get_nic_metrics():
+        if entry.get("name") == iface:
+            return entry
+    return {}
+
+
+def _nic_has_ip_address(iface: str) -> bool:
+    out = run(["ip", "-4", "addr", "show", "dev", iface], use_cache=False)
+    return "inet " in out
+
+
+def _nic_kernel_log_has_watchdog_event(kernel_log: str) -> bool:
+    return bool(kernel_log) and bool(NIC_WATCHDOG_LOG_PATTERN.search(kernel_log))
+
+
+def _nic_report(component: str, action: str, result: str, **extra) -> dict:
+    """Part 5: recovery report shape, matching the spec's examples
+    (component/action/.../result/verification)."""
+    report = {"component": component, "action": action, "result": result}
+    report.update(extra)
+    return report
+
+
+def evaluate_and_heal_nic(iface: str = None, confirmation: dict = None, fault: dict = None) -> dict:
+    stages: list[dict[str, Any]] = []
+
+    def stage(message: str, detail: str = None) -> None:
+        stages.append({
+            "message": message,
+            "detail": detail,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    stage("Collecting telemetry...")
+    before_metrics = _safe_collect_metrics()
+
+    if iface is None:
+        sys_metrics = before_metrics.get("system") or {}
+        iface = sys_metrics.get("default_route_interface")
+        if not iface:
+            up = [
+                n.get("name")
+                for n in (before_metrics.get("nic") or [])
+                if str(n.get("link_state") or "").lower() == "up"
+            ]
+            iface = up[0] if up else None
+        if not iface:
+            candidates = [n.get("name") for n in get_nic_inventory() if n.get("mac")]
+            iface = candidates[0] if candidates else ((_list_interfaces() or [None])[0])
+
+    if not iface:
+        stage("Failed", "No usable network interface found")
+        return {"result": "failed", "stages": stages, "message": "no usable interface found"}
+
+    ok, reason, iface = validate_interface(iface)
+    if not ok:
+        stage("Failed", reason)
+        return {"result": "failed", "stages": stages, "interface": iface, "message": reason}
+
+    stage("Analysing interface...", iface)
+    before = _nic_primary_metrics(iface)
+    before_dropped = (before.get("rx_dropped") or 0) + (before.get("tx_dropped") or 0)
+    before_util = max(
+        before.get("utilization_percent") or 0.0,
+        before.get("rx_utilization_percent") or 0.0,
+        before.get("tx_utilization_percent") or 0.0,
+    )
+
+    action_result: dict = {}
+    fault_context = {"interface": iface, "reason": None, **(fault or {})}
+
+    link_state = (before.get("link_state") or "").lower()
+    if link_state != "up":
+        fault_context["reason"] = "link_down"
+        stage("Restarting interface...", iface)
+        raw = _nic_restart_interface({"interface": iface})
+        after_link = _nic_primary_metrics(iface)
+        link_back = (after_link.get("link_state") or "").lower() == "up"
+        action_result = _nic_report(
+            "NIC", "Restart Interface",
+            "success" if raw.get("success") and link_back else "failed",
+            interface=iface,
+            verification="link up" if link_back else "link still down",
+            message=raw.get("message", ""),
+        )
+    else:
+        kernel_log = _get_kernel_log()
+
+        if _nic_kernel_log_has_watchdog_event(kernel_log):
+            fault_context["reason"] = "netdev_watchdog_or_tx_timeout"
+            stage("Reloading driver...", iface)
+            raw = _nic_reload_driver({"interface": iface})
+            action_result = _nic_report(
+                "NIC", "Reload Driver", "success" if raw.get("success") else "failed",
+                interface=iface, message=raw.get("message", ""),
+            )
+        elif not _nic_has_ip_address(iface):
+            fault_context["reason"] = "missing_ip_address"
+            stage("Renewing DHCP...", iface)
+            raw = _nic_renew_dhcp({"interface": iface})
+            if not raw.get("success"):
+                stage("Restarting NetworkManager...")
+                raw = _nic_restart_network_manager({})
+            action_result = _nic_report(
+                "NIC", "Renew DHCP", "success" if raw.get("success") else "failed",
+                interface=iface, message=raw.get("message", ""),
+            )
+        else:
+            rx_util = before.get("rx_utilization_percent") or 0.0
+            tx_util = before.get("tx_utilization_percent") or 0.0
+            total_util = before.get("utilization_percent") or max(rx_util, tx_util)
+            high_utilization = total_util >= NIC_UTILIZATION_CRITICAL_PERCENT
+            total_errors = (before.get("rx_errors") or 0) + (before.get("tx_errors") or 0)
+            has_fault_signal = high_utilization or total_errors > 0 or fault is not None
+
+            if not has_fault_signal:
+                stage("Verified", "Utilization and error counters nominal — no action required")
+                return {
+                    "result": "success",
+                    "stages": stages,
+                    "interface": iface,
+                    "before_utilization": round(before_util, 2),
+                    "after_utilization": round(before_util, 2),
+                    "message": "utilization below threshold, no action needed",
+                }
+
+            fault_context["reason"] = "high_utilization" if high_utilization else "interface_errors"
+            stage("Finding offending process...")
+            top_procs = get_top_nic_processes(limit=20)
+            total_kbps = sum(p.get("total_kbps") or 0.0 for p in top_procs) or 0.0
+            dominant = top_procs[0] if top_procs else None
+            dominant_share = (
+                (dominant.get("total_kbps") or 0.0) / total_kbps * 100
+                if dominant and total_kbps > 0 else 0.0
+            )
+
+            if dominant and dominant_share >= NIC_DOMINANT_PROCESS_PERCENT:
+                ok_pid, reason_pid, pid = validate_pid(dominant.get("pid"))
+                if ok_pid:
+                    stage("Pausing process...", f"PID {pid} · {dominant.get('process') or dominant.get('command')}")
+                    pause_raw = _nic_pause_process({"pid": pid})
+                    if pause_raw.get("success"):
+                        action_result = _nic_report(
+                            "NIC", "Pause Process", "success",
+                            pid=pid, process=dominant.get("process"),
+                            message=pause_raw.get("message", ""),
+                        )
+                    else:
+                        stage("Terminating process...", f"PID {pid}")
+                        raw = _nic_terminate_process({"pid": pid})
+                        after_probe = _nic_primary_metrics(iface)
+                        after_util = max(
+                            after_probe.get("utilization_percent") or 0.0,
+                            after_probe.get("rx_utilization_percent") or 0.0,
+                            after_probe.get("tx_utilization_percent") or 0.0,
+                        )
+                        action_result = _nic_report(
+                            "NIC", "Terminate Process",
+                            "success" if raw.get("success") else "failed",
+                            pid=pid, process=dominant.get("process"),
+                            before_utilization=round(before_util, 2),
+                            after_utilization=round(after_util, 2),
+                            message=raw.get("message", ""),
+                        )
+                else:
+                    stage("Restarting interface...", f"PID not recoverable: {reason_pid}")
+                    raw = _nic_restart_interface({"interface": iface})
+                    action_result = _nic_report(
+                        "NIC", "Restart Interface", "success" if raw.get("success") else "failed",
+                        interface=iface,
+                        message=raw.get("message", ""),
+                        note=f"dominant pid not recoverable ({reason_pid})",
+                    )
+            else:
+                stage("Restarting interface...", "No single dominant process — resetting link")
+                raw = _nic_restart_interface({"interface": iface})
+                action_result = _nic_report(
+                    "NIC", "Restart Interface", "success" if raw.get("success") else "failed",
+                    interface=iface, message=raw.get("message", ""),
+                )
+                after_kernel_log = _get_kernel_log()
+                if _nic_kernel_log_has_watchdog_event(after_kernel_log):
+                    stage("Reloading driver...", "Driver errors persist after interface restart")
+                    reload_raw = _nic_reload_driver({"interface": iface})
+                    action_result = _nic_report(
+                        "NIC", "Reload Driver", "success" if reload_raw.get("success") else "failed",
+                        interface=iface, message=reload_raw.get("message", ""),
+                    )
+
+    stage("Verifying recovery...")
+    time.sleep(NIC_ESCALATION_SETTLE_SECONDS)
+    after = _nic_primary_metrics(iface)
+    after_dropped = (after.get("rx_dropped") or 0) + (after.get("tx_dropped") or 0)
+    after_metrics = _safe_collect_metrics()
+
+    if after_dropped > before_dropped and action_result.get("result") == "success":
+        action_result["result"] = "escalated"
+        action_result["message"] = (
+            f"{action_result.get('message', '')} — RX/TX dropped packets still rising "
+            f"({before_dropped} -> {after_dropped})"
+        ).strip()
+        stage("Escalated", action_result["message"])
+    elif action_result.get("result") == "success":
+        stage("Recovered", action_result.get("message") or "NIC metrics improved")
+    else:
+        stage("Failed", action_result.get("message") or "Recovery action did not succeed")
+
+    record_recovery_history(
+        action=f"nic.auto_heal.{fault_context.get('reason') or 'unknown'}",
+        params={"interface": iface},
+        fault=fault_context,
+        confirmation=confirmation or {"userAcknowledged": True, "level": "auto"},
+        command=action_result.get("action", "nic.auto_heal"),
+        success=action_result.get("result") == "success",
+        message=action_result.get("message", action_result.get("verification", "")),
+        stdout="", stderr="", returncode=None,
+        before_metrics=before_metrics,
+        after_metrics=after_metrics,
+        duration_seconds=None,
+    )
+
+    return {
+        **action_result,
+        "stages": stages,
+        "interface": iface,
+        "beforeMetrics": before_metrics,
+        "afterMetrics": after_metrics,
+    }
+
+
 
 
 def collect_metrics() -> dict[str, Any]:
@@ -1945,10 +2758,12 @@ def collect_metrics() -> dict[str, Any]:
         "nic": get_nic_metrics(),
         "psu": get_psu_metrics(),
         "top_processes": {
-                "cpu": get_top_cpu_processes(),
-                "gpu": get_gpu_processes(),
-                "disk": get_top_disk_io_processes(limit=20),
-    },
+            "cpu": get_top_cpu_processes(),
+            "gpu": get_gpu_processes(),
+            "disk": get_top_disk_io_processes(limit=20),
+            "nic": get_top_nic_processes(limit=20),
+            "network": get_top_network_processes(limit=20),
+        },
     }
     # DEMO: overwrite RAM/DISK/NIC fields per whatever severity is currently
     # set via /demo/<component>/<severity>. No-op while everything is
@@ -3779,6 +4594,28 @@ def compute_health_summary(report: dict[str, Any]) -> dict[str, Any]:
             components_with_warnings += 1
             flag("nic", True, "warning", f"{nic.get('interface')} CRC/frame errors detected")
 
+    for nic_metric in _LATEST_NIC_METRICS:
+        if str(nic_metric.get("link_state") or "").lower() != "up":
+            continue
+        util = nic_metric.get("utilization_percent")
+        if util is None:
+            continue
+        iface_name = nic_metric.get("name") or "unknown"
+        if util >= NIC_UTILIZATION_CRITICAL_PERCENT:
+            components_checked += 1
+            components_with_errors += 1
+            flag(
+                "nic", True, "critical",
+                f"{iface_name} link utilization {util}% exceeds {NIC_UTILIZATION_CRITICAL_PERCENT:g}% critical threshold",
+            )
+        elif util >= NIC_UTILIZATION_WARNING_PERCENT:
+            components_checked += 1
+            components_with_warnings += 1
+            flag(
+                "nic", True, "warning",
+                f"{iface_name} link utilization {util}% exceeds {NIC_UTILIZATION_WARNING_PERCENT:g}% warning threshold",
+            )
+
     # --- USB ---
     usb_health = report.get("usb", {}).get("health") or {}
     if usb_health:
@@ -3996,7 +4833,7 @@ def _recovery_signal(pid: int, sig: int, *, verify_stopped: Optional[bool] = Non
       * verify_stopped=True   -> after SIGSTOP, confirm state == 'T'
       * verify_stopped=False  -> after SIGCONT, confirm state != 'T'
       * verify_gone=True      -> after SIGTERM/SIGKILL, confirm the pid
-                                  no longer exists (its CPU/memory/GPU
+                                  no longer exists (its CPU/memory/GPU/NIC
                                   handles have actually been released)
     """
     sig_name = _RECOVERY_SIGNAL_NAMES.get(sig, str(int(sig)))
@@ -4018,10 +4855,10 @@ def _recovery_signal(pid: int, sig: int, *, verify_stopped: Optional[bool] = Non
         # slightly longer wait before declaring it unverified (SIGKILL
         # should be near-instant; SIGTERM can take a moment). A 'Z'
         # (zombie) state counts as terminated: the kernel has already
-        # reclaimed its CPU/memory/GPU resources, it's just an exit-code
-        # placeholder sitting in the process table until its parent
-        # calls wait() -- that's a bookkeeping detail, not the process
-        # still consuming anything.
+        # reclaimed its CPU/memory/GPU/NIC resources, it's just an
+        # exit-code placeholder sitting in the process table until its
+        # parent calls wait() -- that's a bookkeeping detail, not the
+        # process still consuming anything.
         def _is_gone(pid_to_check: int) -> bool:
             state = _recovery_process_state(pid_to_check)
             return state is None or state == "Z"
@@ -4032,7 +4869,7 @@ def _recovery_signal(pid: int, sig: int, *, verify_stopped: Optional[bool] = Non
             gone = _is_gone(pid)
         res["verified"] = gone
         res["verification"] = (
-            f"pid {pid} confirmed terminated -- its CPU/memory footprint has been released"
+            f"pid {pid} confirmed terminated -- its CPU/memory/GPU/NIC footprint has been released"
             if gone
             else f"pid {pid} still present and running after signal (may be trapping/ignoring it)"
         )
@@ -4086,13 +4923,14 @@ def _recovery_always_supported():
 
 
 # ---- Force-kill primitive --------------------------------------------------
-# Shared by cpu.kill_process, ram.terminate_process, and gpu.terminate_process
-# below. All three send an unconditional `kill ` (SIGKILL) rather than the
-# scheduling-signal path used elsewhere (_recovery_signal), and verify the
-# pid is actually gone from /proc afterward instead of trusting a zero exit
-# code alone. This intentionally skips the graceful-SIGTERM-first approach:
-# these three actions exist specifically for "this is stuck / unresponsive
-# and needs to die now" situations, so they go straight to SIGKILL.
+# Shared by cpu.kill_process, ram.terminate_process, gpu.terminate_process,
+# and nic.kill_process below. All four send an unconditional `kill ` (i.e.
+# SIGKILL) rather than the scheduling-signal path used elsewhere
+# (_recovery_signal), and verify the pid is actually gone from /proc
+# afterward instead of trusting a zero exit code alone. This intentionally
+# skips the graceful-SIGTERM-first approach: these actions exist
+# specifically for "this is stuck / unresponsive and needs to die now"
+# situations, so they go straight to SIGKILL.
 
 def _recovery_force_kill(pid: int, action_label: str) -> dict[str, Any]:
     cmd = ["kill", str(pid)]
@@ -4195,9 +5033,24 @@ def _gpu_pause_process(p):
     )
     return res
 
+def _gpu_resume_process(p):
+    res = _recovery_signal(p["pid"], signal.SIGCONT, verify_stopped=False)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"GPU-using process {p['pid']} resumed (SIGCONT) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "resume failed")
+    )
+    return res
+
 def _gpu_terminate_process(p):
     logger.info("gpu.terminate_process: backend received pid=%s", p.get("pid"))
-    return _recovery_force_kill(p["pid"], "gpu.terminate_process")
+    res = _recovery_signal(p["pid"], signal.SIGTERM, verify_gone=True)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"GPU-using process {p['pid']} terminated (SIGTERM) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "terminate failed")
+    )
+    return res
 
 
 # ---- RAM handlers -----------------------------------------------------------
@@ -4308,6 +5161,47 @@ def _disk_terminate_process(p):
 
 
 # ---- NIC handlers ------------------------------------------------------------
+# Two tiers, mirroring cpu/gpu/ram/disk:
+#   * process-level: pause/resume/terminate/kill whatever PID is actually
+#     saturating the NIC right now (identified via get_top_nic_processes(),
+#     which ranks ANY process by observed bandwidth -- an iperf3 test is
+#     just one example of what could show up here, not a special case).
+#   * subsystem-level (pre-existing): restart_interface / renew_dhcp /
+#     restart_network_manager / reload_driver act on the interface itself,
+#     for faults that aren't a single process's fault (bad driver state,
+#     stale DHCP lease, flapping link, etc).
+
+def _nic_pause_process(p):
+    res = _recovery_signal(p["pid"], signal.SIGSTOP, verify_stopped=True)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Network-heavy process {p['pid']} paused (SIGSTOP) -- {res['verification']}, halting further NIC traffic from it."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "pause failed")
+    )
+    return res
+
+def _nic_resume_process(p):
+    res = _recovery_signal(p["pid"], signal.SIGCONT, verify_stopped=False)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Network-heavy process {p['pid']} resumed (SIGCONT) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "resume failed")
+    )
+    return res
+
+def _nic_terminate_process(p):
+    logger.info("nic.terminate_process: backend received pid=%s", p.get("pid"))
+    res = _recovery_signal(p["pid"], signal.SIGTERM, verify_gone=True)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Network-heavy process {p['pid']} terminated (SIGTERM) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "terminate failed")
+    )
+    return res
+
+def _nic_kill_process(p):
+    logger.info("nic.kill_process: backend received pid=%s", p.get("pid"))
+    return _recovery_force_kill(p["pid"], "nic.kill_process")
 
 def _nic_restart_interface(p):
     iface = p["interface"]
@@ -4422,9 +5316,12 @@ RECOVERY_ACTIONS: dict[str, dict[str, Any]] = {
     "gpu.pause_process": {"handler": _gpu_pause_process, "level": 2, "domain": "gpu",
                            "required_params": ["pid"], "supported_check": _recovery_gpu_check,
                            "description": "Suspend a GPU-using process."},
+    "gpu.resume_process": {"handler": _gpu_resume_process, "level": 1, "domain": "gpu",
+                            "required_params": ["pid"], "supported_check": _recovery_gpu_check,
+                            "description": "Resume a paused GPU-using process (SIGCONT)."},
     "gpu.terminate_process": {"handler": _gpu_terminate_process, "level": 3, "domain": "gpu",
                                "required_params": ["pid"], "supported_check": _recovery_gpu_check,
-                               "description": "Force-kill a GPU-using process (kill -9 / SIGKILL)."},
+                               "description": "Gracefully terminate a GPU-using process (SIGTERM)."},
 
     "ram.restart_service": {"handler": _restart_service, "level": 2, "domain": "ram",
                              "required_params": ["unit"], "supported_check": _recovery_root_check("systemctl"),
@@ -4458,6 +5355,22 @@ RECOVERY_ACTIONS: dict[str, dict[str, Any]] = {
                                 "required_params": ["pid"], "supported_check": _recovery_always_supported,
                                 "description": "Gracefully terminate a disk I/O-heavy process (SIGTERM)."},
 
+    # --- NIC: process-level (Trial6) ---
+    "nic.pause_process": {"handler": _nic_pause_process, "level": 2, "domain": "nic",
+                           "required_params": ["pid"], "supported_check": _recovery_always_supported,
+                           "description": "Suspend a network-bandwidth-heavy process (SIGSTOP) -- e.g. an iperf3 "
+                                          "test, a runaway rsync/scp, or any other process saturating the NIC."},
+    "nic.resume_process": {"handler": _nic_resume_process, "level": 1, "domain": "nic",
+                            "required_params": ["pid"], "supported_check": _recovery_always_supported,
+                            "description": "Resume a paused network-bandwidth-heavy process (SIGCONT)."},
+    "nic.terminate_process": {"handler": _nic_terminate_process, "level": 3, "domain": "nic",
+                               "required_params": ["pid"], "supported_check": _recovery_always_supported,
+                               "description": "Gracefully terminate a network-bandwidth-heavy process (SIGTERM)."},
+    "nic.kill_process": {"handler": _nic_kill_process, "level": 3, "domain": "nic",
+                          "required_params": ["pid"], "supported_check": _recovery_always_supported,
+                          "description": "Force-kill a network-bandwidth-heavy process (kill -9 / SIGKILL)."},
+
+    # --- NIC: subsystem/interface-level (pre-existing) ---
     "nic.restart_interface": {"handler": _nic_restart_interface, "level": 2, "domain": "nic",
                                "required_params": ["interface"], "supported_check": _recovery_root_check("ip"),
                                "description": "Bring a network interface down and back up."},
@@ -4702,27 +5615,36 @@ def get_recovery_process_candidates(domain: str = "cpu", min_percent: float = 1.
     resource, sorted highest-first -- not just the single top offender.
 
     This exists because a workload like `stress-ng --cpu 12` spreads load
-    across many small/medium processes rather than one dominant one; a
-    "top 1" view hides the other 11 candidates a user might want to pause
-    or kill. Re-fetches process data itself (fresh `ps`/`nvidia-smi`, not
-    the last cached /metrics tick) so the list reflects what's true right
-    now, and each entry is pre-checked against the same protected-process
-    rules recovery/execute enforces, so the frontend can grey out
-    unkillable entries (init, sshd, this backend itself, etc.) without a
-    round trip.
+    across many small/medium processes rather than one dominant one (and,
+    for the "nic" domain, a workload like `iperf3 -c ... -P 8` spawns
+    several parallel streams the same way); a "top 1" view hides the other
+    candidates a user might want to pause or kill. Re-fetches process data
+    itself (fresh `ps`/`nvidia-smi`/`nethogs`, not the last cached
+    /metrics tick) so the list reflects what's true right now, and each
+    entry is pre-checked against the same protected-process rules
+    recovery/execute enforces, so the frontend can grey out unkillable
+    entries (init, sshd, this backend itself, etc.) without a round trip.
+
+    domain="nic" is intentionally not tied to any specific traffic tool
+    (iperf3, rsync, curl, a P2P client, ...): it ranks whatever process
+    nethogs attributes the most sent+received KB/s to, so it self-heals
+    ANY NIC-saturating process, not just one specific one.
     """
     candidates: list[dict[str, Any]] = []
 
     if domain == "gpu":
         for proc in get_gpu_processes():
-            pct = proc.get("gpu_compute_percent") or 0.0
-            if pct < min_percent:
+            compute = proc.get("gpu_compute_percent") or 0.0
+            mem_pct = proc.get("gpu_memory_percent") or 0.0
+            mem_mb = proc.get("gpu_memory_mb") or 0
+            usage = max(float(compute), float(mem_pct))
+            if usage < min_percent and mem_mb < 64:
                 continue
             pid = proc.get("pid")
             ok, reason, _ = validate_pid(pid) if pid is not None else (False, "invalid pid", None)
             candidates.append({
                 **proc,
-                "usage_percent": pct,
+                "usage_percent": usage if usage > 0 else mem_mb,
                 "recoverable": ok,
                 "reason": None if ok else reason,
             })
@@ -4735,6 +5657,36 @@ def get_recovery_process_candidates(domain: str = "cpu", min_percent: float = 1.
             ok, reason, _ = validate_pid(pid) if pid is not None else (False, "invalid pid", None)
             candidates.append({
                 **proc,
+                "usage_percent": kbps,
+                "recoverable": ok,
+                "reason": None if ok else reason,
+            })
+    elif domain == "nic":
+        # min_percent is interpreted as a total_kbps (sent+received)
+        # threshold here, mirroring the "disk" domain's kbps semantics
+        # above -- NIC bandwidth, like disk I/O, isn't a 0-100 percent
+        # quantity.
+        for proc in get_top_nic_processes(limit=max(limit, 50)):
+            kbps = proc.get("total_kbps") or 0.0
+            source = proc.get("source") or ""
+            if kbps < min_percent and source not in ("pgrep", "ss"):
+                continue
+            pid = proc.get("pid")
+            ok, reason, _ = validate_pid(pid) if pid is not None else (False, "invalid pid", None)
+            rx_mbps = proc.get("rx_mbps")
+            tx_mbps = proc.get("tx_mbps")
+            total_mbps = proc.get("total_mbps")
+            if total_mbps is None and kbps:
+                total_mbps = _kbps_to_mbps(kbps)
+            if rx_mbps is None and proc.get("received_kbps") is not None:
+                rx_mbps = _kbps_to_mbps(proc.get("received_kbps"))
+            if tx_mbps is None and proc.get("sent_kbps") is not None:
+                tx_mbps = _kbps_to_mbps(proc.get("sent_kbps"))
+            candidates.append({
+                **proc,
+                "rx_mbps": rx_mbps,
+                "tx_mbps": tx_mbps,
+                "total_mbps": total_mbps,
                 "usage_percent": kbps,
                 "recoverable": ok,
                 "reason": None if ok else reason,
@@ -5021,14 +5973,16 @@ def recovery_capabilities_endpoint():
 def recovery_process_candidates_endpoint():
     """All processes above a usage threshold, descending, each flagged
     recoverable/not -- lets the frontend show every meaningful consumer
-    (e.g. all 12 stress-ng workers) instead of just the single biggest
-    one, so the user can pick which to pause/kill and which to leave.
+    (e.g. all 12 stress-ng workers, or all 8 parallel iperf3 -P streams)
+    instead of just the single biggest one, so the user can pick which to
+    pause/kill and which to leave.
 
         GET /recovery/process_candidates?domain=cpu&min_percent=1&limit=50
+        GET /recovery/process_candidates?domain=nic&min_percent=50&limit=50
     """
     domain = request.args.get("domain", default="cpu")
-    if domain not in ("cpu", "gpu", "disk"):
-        return jsonify({"success": False, "message": "domain must be 'cpu', 'gpu', or 'disk'"}), 400
+    if domain not in ("cpu", "gpu", "disk", "nic"):
+        return jsonify({"success": False, "message": "domain must be 'cpu', 'gpu', 'disk', or 'nic'"}), 400
 
     min_percent = request.args.get("min_percent", default=1.0, type=float)
     limit = request.args.get("limit", default=50, type=int)
@@ -5061,6 +6015,26 @@ def recovery_execute_endpoint():
     status = 200 if result.get("success") else 409
     return jsonify(result), status
 
+@app.route("/recovery/nic/auto_heal", methods=["POST"])
+def recovery_nic_auto_heal_endpoint():
+    body = request.get_json(silent=True) or {}
+    iface = body.get("interface")
+
+    try:
+        result = evaluate_and_heal_nic(
+            iface=iface,
+            confirmation=body.get("confirmation"),
+            fault=body.get("fault"),
+        )
+    except Exception as exc:
+        logging.exception("Unhandled error in evaluate_and_heal_nic")
+        return jsonify({"success": False, "result": "failed", "message": f"internal error: {exc}"}), 500
+
+    result["success"] = result.get("result") == "success"
+    status = 200 if result.get("result") == "success" else (
+        409 if result.get("result") == "escalated" else 400
+    )
+    return jsonify(result), status
 
 @app.route("/recovery/history")
 def recovery_history_endpoint():
@@ -5082,6 +6056,19 @@ def recovery_history_endpoint():
 # Values ramp gradually toward the target severity over
 # RAMP_SECONDS (60s by default) rather than jumping
 # instantly -- see the DEMO section near the top of this file.
+#
+# Tip for exercising the new NIC self-healing path end-to-end: generate
+# real NIC load with iperf3 (any traffic generator works the same way,
+# since get_top_nic_processes() ranks by observed bandwidth, not by tool
+# name) --
+#     iperf3 -s                                   # on the target host
+#     iperf3 -c <linux-ip> -P 8 -t 300             # from a client
+# -- then either let `pkill -f iperf3` clean it up manually, or drive it
+# through the API instead: GET /recovery/process_candidates?domain=nic
+# to find the iperf3 PID(s), then POST /recovery/execute with
+# {"action": "nic.pause_process"|"nic.terminate_process"|"nic.kill_process",
+#  "params": {"pid": <pid>}, "confirmation": {"userAcknowledged": true,
+#  "level": 2 or 3}}.
 
 @app.route("/demo/state")
 def demo_state():
@@ -5145,5 +6132,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

@@ -1,7 +1,7 @@
 /**
  * useFaults Hook
  * Manages fault log filtering; fault data is supplied by live telemetry.
- * Overlays Auto Recovered status from recovery history.
+ * Overlays Recovered status from recovery history.
  */
 
 import { useState, useMemo, useEffect } from "react";
@@ -14,8 +14,8 @@ function enrichFaultRow(row) {
   if (!row?.id || !isFaultAutoRecovered(row.id)) return row;
   return {
     ...row,
-    status: "Auto Recovered",
-    recoveryStatus: "auto_recovered",
+    status: "Recovered",
+    recoveryStatus: "recovered",
   };
 }
 
@@ -36,8 +36,8 @@ export function useFaults(faultRows = []) {
       return enrichedRows.filter(
         (row) =>
           row.severity.toLowerCase() === "resolved" ||
-          row.status === "Auto Recovered" ||
-          row.recoveryStatus === "auto_recovered"
+          row.status === "Recovered" ||
+          row.recoveryStatus === "recovered"
       );
     }
     return enrichedRows.filter(

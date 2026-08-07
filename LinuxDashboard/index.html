@@ -419,7 +419,7 @@ details.section-details pre {
 </main>
 
 <script>
-const LINUX_SERVER = "http://10.17.27.185:5000";
+const LINUX_SERVER = "http://10.17.3.233:5000";
 
 /* Hardware Monitor Dashboard - vanilla JS only */
 
@@ -475,7 +475,7 @@ function setProgressBar(elId, percent) {
   el.style.width = `${pct}%`;
   el.classList.remove("warn", "bad");
   if (pct >= 90) el.classList.add("bad");
-  else if (pct >= 70) el.classList.add("warn");
+  else if (pct >= 80) el.classList.add("warn");
 }
 
 // Maps a link_health style status string ("Healthy" / "Power Saving" /

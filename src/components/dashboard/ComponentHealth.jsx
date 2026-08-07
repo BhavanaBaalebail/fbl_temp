@@ -131,7 +131,9 @@ export function ComponentHealthStatus({ healthRows, stats }) {
             </div>
             <span
               className={`text-right text-xs leading-snug ${
-                row.name === "GPU" ? "max-w-[62%] whitespace-normal" : "max-w-[55%] truncate"
+                row.name === "GPU" || row.name === "NIC"
+                  ? "max-w-[62%] whitespace-normal"
+                  : "max-w-[55%] truncate"
               }`}
               style={{ color: row.statusColor }}
               title={row.status}

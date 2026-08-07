@@ -10,23 +10,63 @@ import { generateRootCauseAnalysis } from "./recoveryRca.js";
 import { computeRecoveryConfidence } from "./recoveryConfidence.js";
 import { isDiskHardwareFault, isDiskWorkloadFault, mountForFault } from "./diskRecoveryHelpers";
 
+const NIC_PROCESS_ACTION_IDS = new Set([
+  "nic.pause_process",
+  "nic.resume_process",
+  "nic.terminate_process",
+]);
+
+function resolveCatalogActionIds(fault, catalog, target) {
+  if (!catalog) return [];
+  if (fault?.id === "threshold-nic-utilization") {
+    return catalog.actionIds.filter((id) => NIC_PROCESS_ACTION_IDS.has(id));
+  }
+  if (
+    (fault?.id === "threshold-nic-errors" || fault?.id === "threshold-nic-lh-counters") &&
+    target?.process?.pid
+  ) {
+    return catalog.actionIds.filter((id) => NIC_PROCESS_ACTION_IDS.has(id));
+  }
+  return catalog.actionIds;
+}
+
+function filterRecommendationsForFault(fault, recommendations, target) {
+  const id = fault?.id || "";
+  if (id === "threshold-nic-utilization") {
+    return recommendations.filter((r) => NIC_PROCESS_ACTION_IDS.has(r.actionId));
+  }
+  if (
+    (id === "threshold-nic-errors" || id === "threshold-nic-lh-counters") &&
+    target?.process?.pid
+  ) {
+    return recommendations.filter((r) => NIC_PROCESS_ACTION_IDS.has(r.actionId));
+  }
+  return recommendations;
+}
+
 function buildActionReason(action, fault, target, rca) {
   const proc = target?.process;
   if (action.requires?.process && proc?.pid) {
     const usage =
       proc.ioTotalKbps != null
         ? `${proc.ioTotalKbps} KB/s total I/O`
-        : proc.cpu != null
-          ? `${proc.cpu}% CPU`
-          : proc.gpuCompute != null
-            ? `${proc.gpuCompute}% GPU`
-            : proc.memory != null
-              ? `${proc.memory}% MEM`
-              : "";
+        : proc.total_mbps != null
+          ? `${proc.total_mbps} Mbps network`
+          : proc.totalKbps != null
+            ? `${proc.totalKbps} KB/s network`
+            : proc.cpu != null
+            ? `${proc.cpu}% CPU`
+            : proc.gpuCompute != null
+              ? `${proc.gpuCompute}% GPU`
+              : proc.memory != null
+                ? `${proc.memory}% MEM`
+                : "";
     const verb =
       fault?.component === "DISK" && isDiskWorkloadFault(fault)
         ? "disk I/O consumer"
-        : "primary resource consumer";
+        : fault?.component === "NIC"
+          ? "network bandwidth consumer"
+          : "primary resource consumer";
     return `Process ${proc.name || "unknown"} (PID ${proc.pid})${usage ? ` using ${usage}` : ""} is the ${verb} contributing to this fault.`;
   }
   if (action.requires?.interface && target?.interface) {
@@ -47,6 +87,7 @@ function scoreRecommendation(action, fault, target, evidence) {
 
   if (action.requires?.process && target?.process?.pid) score += 15;
   if (action.requires?.process && target?.process?.ioTotalKbps != null) score += 10;
+  if (action.requires?.process && target?.process?.total_mbps != null) score += 10;
   if (fault.severity === "Warning" && action.level <= 2) score += 5;
   if (fault.severity === "Critical" && action.level === 1) score += 5;
 
@@ -207,8 +248,9 @@ export function generateRecommendations(fault, inventory, metrics, linkHealth, c
   const evidence = collectEvidence(fault, inventory, metrics, linkHealth);
   const rca = generateRootCauseAnalysis(fault, evidence, metrics, linkHealth);
   const target = getRecoveryTarget(fault, metrics, inventory, linkHealth);
+  const actionIds = resolveCatalogActionIds(fault, catalog, target);
 
-  const actionRecommendations = catalog.actionIds
+  const actionRecommendations = actionIds
     .map((actionId) => {
       const action = getActionById(actionId);
       if (!action) return null;
@@ -252,7 +294,11 @@ export function generateRecommendations(fault, inventory, metrics, linkHealth, c
     })
     .filter(Boolean);
 
-  const recommendations = [...buildDiskAdvisoryRecommendations(fault, rca), ...actionRecommendations];
+  const recommendations = filterRecommendationsForFault(
+    fault,
+    [...buildDiskAdvisoryRecommendations(fault, rca), ...actionRecommendations],
+    target
+  );
 
   return recommendations.sort((a, b) => {
     const aAdv = String(a.actionId).startsWith("advisory.");

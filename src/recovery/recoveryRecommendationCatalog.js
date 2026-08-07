@@ -32,8 +32,20 @@ export const RECOMMENDATION_CATALOG = [
     match: (f) => f.id?.startsWith("threshold-gpu-temperature"),
     actionIds: [
       "gpu.pause_process",
+      "gpu.resume_process",
       "gpu.terminate_process",
       "gpu.restart_persistence_daemon",
+      "gpu.reset",
+    ],
+  },
+  {
+    id: "gpu-utilization",
+    label: "GPU Utilization Recovery",
+    match: (f) => f.id === "threshold-gpu-utilization",
+    actionIds: [
+      "gpu.pause_process",
+      "gpu.resume_process",
+      "gpu.terminate_process",
       "gpu.reset",
     ],
   },
@@ -41,7 +53,23 @@ export const RECOMMENDATION_CATALOG = [
     id: "gpu-vram",
     label: "GPU VRAM Recovery",
     match: (f) => f.id === "threshold-gpu-vram",
-    actionIds: ["gpu.pause_process", "gpu.terminate_process", "gpu.reset"],
+    actionIds: [
+      "gpu.pause_process",
+      "gpu.resume_process",
+      "gpu.terminate_process",
+      "gpu.reset",
+    ],
+  },
+  {
+    id: "gpu-power",
+    label: "GPU Power Recovery",
+    match: (f) => f.id === "threshold-gpu-power",
+    actionIds: [
+      "gpu.pause_process",
+      "gpu.resume_process",
+      "gpu.terminate_process",
+      "gpu.restart_persistence_daemon",
+    ],
   },
   {
     id: "gpu-pcie",
@@ -101,10 +129,23 @@ export const RECOMMENDATION_CATALOG = [
     actionIds: ["disk.identify_large_directories"],
   },
   {
+    id: "nic-utilization",
+    label: "NIC Utilization Recovery",
+    match: (f) => f.id === "threshold-nic-utilization",
+    actionIds: [
+      "nic.pause_process",
+      "nic.resume_process",
+      "nic.terminate_process",
+    ],
+  },
+  {
     id: "nic-errors",
     label: "NIC Error Recovery",
     match: (f) => f.id === "threshold-nic-errors" || f.id === "threshold-nic-lh-counters",
     actionIds: [
+      "nic.pause_process",
+      "nic.resume_process",
+      "nic.terminate_process",
       "nic.restart_interface",
       "nic.reload_driver",
       "nic.restart_network_manager",
@@ -115,6 +156,9 @@ export const RECOMMENDATION_CATALOG = [
     label: "Network Connectivity Recovery",
     match: (f) => f.id === "threshold-nic-connectivity" || f.id === "threshold-nic-link-down",
     actionIds: [
+      "nic.pause_process",
+      "nic.resume_process",
+      "nic.terminate_process",
       "nic.restart_interface",
       "nic.renew_dhcp",
       "nic.restart_network_manager",

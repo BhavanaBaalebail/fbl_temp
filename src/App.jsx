@@ -9,7 +9,9 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { MetricCard } from "./components/dashboard/MetricCard";
 import { SeverityChart } from "./components/dashboard/SeverityChart";
 import { ComponentHealthStatus } from "./components/dashboard/ComponentHealth";
+import { DashboardRecoverableFaults } from "./components/dashboard/DashboardRecoverableFaults";
 import { FaultDetectionTab } from "./components/faults/FaultDetection";
+import { FaultModal } from "./components/faults/FaultModal";
 import { ReportsPage } from "./components/reports/ReportsPage";
 import { TopologyCanvas } from "./components/connectivity/TopologyCanvas";
 import { ChatWidget } from "./components/chatbot/ChatWidget";
@@ -41,6 +43,8 @@ function Dashboard({
   hostname,
   error,
   linkHealthSummary,
+  faults,
+  onViewFault,
 }) {
   const updatedLabel = lastUpdated
     ? lastUpdated.toLocaleTimeString()
@@ -100,6 +104,12 @@ function Dashboard({
       </header>
 
       <BusConnector />
+
+      <DashboardRecoverableFaults
+        faults={faults}
+        connected={connected}
+        onViewFault={onViewFault}
+      />
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-4">
         {metrics.map((metric) => (
@@ -199,9 +209,18 @@ function Connectivity({ topology, health, connected }) {
 
 function App() {
   const [activeTab, setActiveTab] = useState("Dashboard");
+  const [dashboardFaultModal, setDashboardFaultModal] = useState(null);
   const telemetry = useTelemetry();
   const topology = useTopology(telemetry.topologyContext);
   const faults = useFaults(telemetry.faults);
+
+  const handleRecoveryComplete = () => {
+    telemetry.refreshNow();
+  };
+
+  const dashboardFaultRow = dashboardFaultModal
+    ? faults.faults?.find((f) => f.id === dashboardFaultModal.id) || dashboardFaultModal
+    : null;
 
   const dashboard = {
     metrics: telemetry.metrics,
@@ -214,6 +233,8 @@ function App() {
     hostname: telemetry.hostname,
     error: telemetry.error,
     linkHealthSummary: telemetry.linkHealthSummary,
+    faults: faults.faults,
+    onViewFault: (fault) => setDashboardFaultModal(fault),
   };
 
   return (
@@ -260,8 +281,11 @@ function App() {
                 lastUpdated={telemetry.lastUpdated}
                 linkHealthSummary={telemetry.linkHealthSummary}
                 liveMetrics={telemetry.rawMetrics}
+                liveLinkHealth={telemetry.rawLinkHealth}
+                liveInventory={telemetry.rawInventory}
                 statusPillTone={statusPillTone}
                 cardStatusTone={cardStatusTone}
+                onRecoveryComplete={handleRecoveryComplete}
               />
             )}
             {activeTab === "Reports" && (
@@ -272,6 +296,18 @@ function App() {
       </div>
 
       <ChatWidget />
+
+      {dashboardFaultRow && activeTab === "Dashboard" && (
+        <FaultModal
+          fault={dashboardFaultRow}
+          connected={telemetry.connected}
+          liveMetrics={telemetry.rawMetrics}
+          liveLinkHealth={telemetry.rawLinkHealth}
+          liveInventory={telemetry.rawInventory}
+          onRecoveryComplete={handleRecoveryComplete}
+          onClose={() => setDashboardFaultModal(null)}
+        />
+      )}
     </div>
   );
 }

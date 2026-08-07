@@ -15,7 +15,7 @@ import {
 import { enrichMetricsGpu } from "./gpuMetricsSupplement";
 
 const LINUX_SERVER =
-  import.meta.env.VITE_LINUX_SERVER || "http://10.17.27.185:5000";
+  import.meta.env.VITE_LINUX_SERVER || "http://10.17.3.233:5000";
 
 const REFRESH_MS = 5000;
 

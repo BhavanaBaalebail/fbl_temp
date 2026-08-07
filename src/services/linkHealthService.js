@@ -41,6 +41,83 @@ const GPU_UTIL_THRESHOLDS = {
   criticalMin: 97,
 };
 
+/** CPU metric thresholds — industry-standard sustained utilization (80/90 rule) */
+const CPU_UTIL_THRESHOLDS = {
+  warningMin: 80,
+  criticalMin: 90,
+};
+
+/** NIC link utilization thresholds — combined RX+TX vs negotiated link speed */
+export const NIC_UTIL_THRESHOLDS = {
+  warningMin: 10, // TESTING ONLY — revert to 70 for production
+  criticalMin: 20, // TESTING ONLY — revert to 80 for production
+};
+
+function nicUtilThresholdLabel(severity) {
+  return severity === "Critical"
+    ? `≥ ${NIC_UTIL_THRESHOLDS.criticalMin}% (Critical)`
+    : `≥ ${NIC_UTIL_THRESHOLDS.warningMin}% (Warning)`;
+}
+
+export function getPrimaryNicInterface(metrics) {
+  const nics = metrics?.nic || [];
+  const sys = metrics?.system || {};
+  const def = sys.default_route_interface;
+  const physical = enumeratePhysicalNetworkInterfaces(nics);
+  const up = physical.filter(isLinkUp);
+  if (def) {
+    const match = up.find((n) => n.name === def) || nics.find((n) => n.name === def);
+    if (match) return match;
+  }
+  return up[0] || physical[0] || null;
+}
+
+function nicUtilizationLevel(utilPct) {
+  if (utilPct == null) return null;
+  if (utilPct >= NIC_UTIL_THRESHOLDS.criticalMin) return "critical";
+  if (utilPct >= NIC_UTIL_THRESHOLDS.warningMin) return "warning";
+  return "healthy";
+}
+
+export function buildNicTelemetryDetail(metrics) {
+  const primary = getPrimaryNicInterface(metrics);
+  if (!primary) return null;
+  const util = num(primary.utilization_percent);
+  const thresholdLevel =
+    nicUtilizationLevel(util) || primary.utilization_threshold_status || "healthy";
+  return {
+    interface: primary.name,
+    linkState: primary.link_state,
+    speedMbps: num(primary.speed_mbps) ?? num(primary.speed),
+    utilizationPercent: util,
+    rxMbps: num(primary.rx_mbps),
+    txMbps: num(primary.tx_mbps),
+    rxPacketsPerSec: num(primary.rx_packets_per_sec),
+    txPacketsPerSec: num(primary.tx_packets_per_sec),
+    rxErrors: primary.rx_errors ?? 0,
+    txErrors: primary.tx_errors ?? 0,
+    rxDropped: primary.rx_dropped ?? 0,
+    txDropped: primary.tx_dropped ?? 0,
+    thresholdLevel,
+  };
+}
+
+function num(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function cpuUtilThresholdLabel(severity) {
+  return severity === "Critical"
+    ? `≥ ${CPU_UTIL_THRESHOLDS.criticalMin}% (Critical)`
+    : `≥ ${CPU_UTIL_THRESHOLDS.warningMin}% (Warning)`;
+}
+
+const CPU_TEMP_THRESHOLDS = {
+  warningC: 75,
+  criticalC: 85,
+};
+
 const LINK_HEALTH_SCORE_PENALTY = {
   critical: 25,
   warning: 12,
@@ -245,6 +322,25 @@ function abbreviateGpuModel(model) {
   return model;
 }
 
+function buildNicStatusParts(primaryNic, nicUtil) {
+  const parts = [];
+  if (nicUtil != null) parts.push(`${nicUtil}% util`);
+  if (primaryNic) {
+    parts.push(`${primaryNic.name} ${String(primaryNic.link_state || "?").toUpperCase()}`);
+    const speed = primaryNic.speed_mbps ?? primaryNic.speed;
+    if (speed != null) parts.push(`${speed} Mbps`);
+    if (primaryNic.rx_mbps != null) parts.push(`RX ${primaryNic.rx_mbps} Mbps`);
+    if (primaryNic.tx_mbps != null) parts.push(`TX ${primaryNic.tx_mbps} Mbps`);
+  }
+  return parts;
+}
+
+function formatNicAssessmentStatus(nicLevel, primaryNic, nicUtil) {
+  const parts = buildNicStatusParts(primaryNic, nicUtil);
+  if (parts.length > 0) return `${statusLabel(nicLevel)} — ${parts.join(", ")}`;
+  return `${statusLabel(nicLevel)} — nominal`;
+}
+
 function buildGpuStatusParts(gpuM) {
   const parts = [];
   parts.push(
@@ -418,6 +514,16 @@ function evaluateNicHealth(linkHealth, metrics) {
 
   let nicLevel = "healthy";
 
+  const primaryNic = getPrimaryNicInterface(metrics);
+  const nicUtil = num(primaryNic?.utilization_percent);
+  if (primaryNic && isLinkUp(primaryNic) && nicUtil != null) {
+    if (nicUtil >= NIC_UTIL_THRESHOLDS.criticalMin) {
+      nicLevel = worstLevel(nicLevel, "critical");
+    } else if (nicUtil >= NIC_UTIL_THRESHOLDS.warningMin) {
+      nicLevel = worstLevel(nicLevel, "warning");
+    }
+  }
+
   if (physicalNics.length === 0) {
     nicLevel = "unknown";
   } else if (upNics.length === 0) {
@@ -437,6 +543,8 @@ function evaluateNicHealth(linkHealth, metrics) {
       errNames.length > 0
         ? `Warning — NIC Link Health Counters - Errors detected (${errNames.join(", ")})`
         : "Warning — NIC Link Health Counters - Errors detected";
+  } else if (primaryNic && isLinkUp(primaryNic)) {
+    status = formatNicAssessmentStatus(nicLevel, primaryNic, nicUtil);
   } else {
     status = buildNicHealthyStatus(upNics, downNics);
   }
@@ -658,15 +766,28 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
     (cpuH.thermal_throttling_total_core_count || 0) +
     (cpuH.thermal_throttling_total_package_count || 0);
   let cpuLevel = sectionStatus("cpu", lh);
-  if (cpuM.temperature_celsius >= 85 || cpuM.usage_percent >= 90) cpuLevel = worstLevel(cpuLevel, "critical");
-  else if (cpuM.temperature_celsius >= 75 || cpuM.usage_percent >= 70) cpuLevel = worstLevel(cpuLevel, "warning");
+  const cpuUtil = num(cpuM.usage_percent);
+  const cpuTemp = num(cpuM.temperature_celsius);
+  if (
+    (cpuTemp != null && cpuTemp >= CPU_TEMP_THRESHOLDS.criticalC) ||
+    (cpuUtil != null && cpuUtil >= CPU_UTIL_THRESHOLDS.criticalMin)
+  )
+    cpuLevel = worstLevel(cpuLevel, "critical");
+  else if (
+    (cpuTemp != null && cpuTemp >= CPU_TEMP_THRESHOLDS.warningC) ||
+    (cpuUtil != null && cpuUtil >= CPU_UTIL_THRESHOLDS.warningMin)
+  )
+    cpuLevel = worstLevel(cpuLevel, "warning");
 
   const cpuParts = [];
   if (cpuH.fatal_errors > 0) cpuParts.push(`${cpuH.fatal_errors} fatal error(s)`);
   if (cpuH.corrected_errors > 0) cpuParts.push(`${cpuH.corrected_errors} corrected error(s)`);
   if (cpuThrottle > 0) cpuParts.push(`thermal throttle ×${cpuThrottle}`);
-  if (cpuM.usage_percent != null) cpuParts.push(`${cpuM.usage_percent}% usage`);
-  if (cpuM.temperature_celsius != null) cpuParts.push(`${cpuM.temperature_celsius}°C`);
+  if (cpuUtil != null) {
+    const utilHigh = cpuUtil >= CPU_UTIL_THRESHOLDS.warningMin ? "elevated" : "nominal";
+    cpuParts.push(`${cpuUtil}% utilization (${utilHigh})`);
+  }
+  if (cpuTemp != null) cpuParts.push(`${cpuTemp}°C`);
 
   assessments.CPU = {
     level: cpuLevel,
@@ -855,19 +976,26 @@ function deviceFromDiskThresholdId(id) {
   return null;
 }
 
-export function enrichThresholdFaultWithTelemetry(fault, metrics) {
+export function enrichThresholdFaultWithTelemetry(fault, metrics, linkHealth = null, inventory = null) {
   if (!fault || fault.source !== "threshold") return fault;
 
   const timestamp = metrics?.timestamp || new Date().toISOString();
+  const lh = linkHealth || {};
+  const inv = inventory || {};
+  const id = fault.id || "";
+  const cpu = metrics?.cpu || {};
   const device = deviceFromDiskThresholdId(fault.id);
   const perf =
     device != null
       ? (metrics?.disk?.performance || []).find((p) => p.device === device)
       : null;
 
+  const liveFields = syncLiveThresholdFields(fault, metrics, lh, inv);
+
   if (perf) {
     return {
       ...fault,
+      ...liveFields,
       telemetryDetail: {
         type: "disk_performance",
         device: perf.device ?? device,
@@ -878,9 +1006,107 @@ export function enrichThresholdFaultWithTelemetry(fault, metrics) {
         read_IOPS: perf.read_IOPS,
         write_IOPS: perf.write_IOPS,
         timestamp,
-        thresholdCrossed: fault.thresholdCrossed,
+        thresholdCrossed: liveFields.thresholdCrossed ?? fault.thresholdCrossed,
         metricName: fault.metricName,
-        currentValue: fault.currentValue,
+        currentValue: liveFields.currentValue ?? fault.currentValue,
+        status: fault.status,
+        severity: fault.severity,
+      },
+    };
+  }
+
+  const gpu = getPrimaryGpu(metrics, inv, lh);
+  const isCpuUsageFault = id === "threshold-cpu-usage";
+  if (isCpuUsageFault) {
+    return {
+      ...fault,
+      ...liveFields,
+      telemetryDetail: {
+        type: "cpu_metrics",
+        usage_percent: num(cpu.usage_percent),
+        temperature_celsius: num(cpu.temperature_celsius),
+        load_1min: cpu.load_average?.["1min"] ?? null,
+        current_mhz: cpu.current_mhz ?? null,
+        user_percent: cpu.user_percent ?? null,
+        system_percent: cpu.system_percent ?? null,
+        iowait_percent: cpu.iowait_percent ?? null,
+        timestamp,
+        thresholdCrossed: liveFields.thresholdCrossed ?? cpuUtilThresholdLabel(fault.severity),
+        metricName: fault.metricName,
+        currentValue: liveFields.currentValue ?? fault.currentValue,
+        status: fault.status,
+        severity: fault.severity,
+      },
+    };
+  }
+
+  const isGpuFault = fault.component === "GPU" || String(fault.id || "").includes("gpu");
+  if (isGpuFault && gpu) {
+    return {
+      ...fault,
+      ...liveFields,
+      telemetryDetail: {
+        type: "gpu_metrics",
+        model: gpu.model ?? null,
+        pci_bus_id: gpu.pci_bus_id ?? null,
+        temperature_celsius: gpu.temperature_celsius ?? null,
+        gpu_utilization_percent: gpu.gpu_utilization_percent ?? null,
+        memory_utilization_percent: gpu.memory_utilization_percent ?? null,
+        memory_used_mb: gpu.memory_used_mb ?? null,
+        vram_total_mb: gpu.vram_total_mb ?? null,
+        power_draw_watts: gpu.power_draw_watts ?? null,
+        power_limit_watts: gpu.power_limit_watts ?? null,
+        fan_speed_percent: gpu.fan_speed_percent ?? null,
+        graphics_clock_mhz: gpu.graphics_clock_mhz ?? null,
+        memory_clock_mhz: gpu.memory_clock_mhz ?? null,
+        link_status: gpu.link_status ?? (lh.gpu || [])[0]?.health?.link_status ?? null,
+        timestamp,
+        thresholdCrossed: liveFields.thresholdCrossed ?? fault.thresholdCrossed,
+        metricName: fault.metricName,
+        currentValue: liveFields.currentValue ?? fault.currentValue,
+        status: fault.status,
+        severity: fault.severity,
+      },
+    };
+  }
+
+  const isNicFault = fault.component === "NIC" || id.includes("nic");
+  if (isNicFault) {
+    const sys = metrics?.system || {};
+    const primary = getPrimaryNicInterface(metrics);
+    const topNic = (metrics?.top_processes?.nic || metrics?.top_processes?.network || [])[0];
+    return {
+      ...fault,
+      ...liveFields,
+      telemetryDetail: {
+        type: "nic_metrics",
+        interface: primary?.name ?? null,
+        link_state: primary?.link_state ?? null,
+        speed: primary?.speed ?? null,
+        speed_mbps: primary?.speed_mbps ?? null,
+        duplex: primary?.duplex ?? null,
+        rx_errors: primary?.rx_errors ?? null,
+        tx_errors: primary?.tx_errors ?? null,
+        rx_dropped: primary?.rx_dropped ?? null,
+        tx_dropped: primary?.tx_dropped ?? null,
+        rx_mbps: primary?.rx_mbps ?? null,
+        tx_mbps: primary?.tx_mbps ?? null,
+        utilization_percent: primary?.utilization_percent ?? null,
+        rx_utilization_percent: primary?.rx_utilization_percent ?? null,
+        tx_utilization_percent: primary?.tx_utilization_percent ?? null,
+        utilization_threshold_status: primary?.utilization_threshold_status ?? null,
+        rx_packets_per_sec: primary?.rx_packets_per_sec ?? null,
+        tx_packets_per_sec: primary?.tx_packets_per_sec ?? null,
+        network_connectivity: sys.network_connectivity ?? sys.connectivity ?? null,
+        default_route_interface: sys.default_route_interface ?? null,
+        top_process_pid: topNic?.pid ?? null,
+        top_process_name: topNic?.process ?? topNic?.program ?? null,
+        top_process_total_kbps: topNic?.total_kbps ?? null,
+        top_process_total_mbps: topNic?.total_mbps ?? null,
+        timestamp,
+        thresholdCrossed: liveFields.thresholdCrossed ?? fault.thresholdCrossed,
+        metricName: fault.metricName,
+        currentValue: liveFields.currentValue ?? fault.currentValue,
         status: fault.status,
         severity: fault.severity,
       },
@@ -889,11 +1115,12 @@ export function enrichThresholdFaultWithTelemetry(fault, metrics) {
 
   return {
     ...fault,
+    ...liveFields,
     telemetryDetail: {
       type: "threshold",
       metricName: fault.metricName,
-      currentValue: fault.currentValue,
-      thresholdCrossed: fault.thresholdCrossed,
+      currentValue: liveFields.currentValue ?? fault.currentValue,
+      thresholdCrossed: liveFields.thresholdCrossed ?? fault.thresholdCrossed,
       timestamp,
       status: fault.status,
       severity: fault.severity,
@@ -901,9 +1128,88 @@ export function enrichThresholdFaultWithTelemetry(fault, metrics) {
   };
 }
 
-function enrichThresholdFaultList(faults, metrics) {
+function syncLiveThresholdFields(fault, metrics, linkHealth, inventory) {
+  const id = fault.id || "";
+  const cpu = metrics?.cpu || {};
+  const gpu = getPrimaryGpu(metrics, inventory, linkHealth);
+  const fields = {};
+
+  if (id === "threshold-cpu-usage") {
+    const util = num(cpu.usage_percent);
+    if (util != null) fields.currentValue = `${util}%`;
+    fields.thresholdCrossed = cpuUtilThresholdLabel(fault.severity);
+  }
+
+  if (id === "threshold-cpu-temperature") {
+    const temp = num(cpu.temperature_celsius);
+    if (temp != null) fields.currentValue = `${temp}°C`;
+    fields.thresholdCrossed =
+      fault.severity === "Critical"
+        ? `≥ ${CPU_TEMP_THRESHOLDS.criticalC}°C (Critical)`
+        : `≥ ${CPU_TEMP_THRESHOLDS.warningC}°C (Warning)`;
+  }
+
+  if (id.startsWith("threshold-gpu-temperature") && gpu?.temperature_celsius != null) {
+    fields.currentValue = `${gpu.temperature_celsius}°C`;
+    fields.thresholdCrossed =
+      fault.severity === "Critical"
+        ? `≥ ${GPU_TEMP_THRESHOLDS.criticalC}°C (Critical)`
+        : `≥ ${GPU_TEMP_THRESHOLDS.warningC}°C (Warning)`;
+  }
+
+  if (id === "threshold-gpu-utilization" && gpu?.gpu_utilization_percent != null) {
+    fields.currentValue = `${gpu.gpu_utilization_percent}%`;
+    fields.thresholdCrossed =
+      fault.severity === "Critical"
+        ? `> ${GPU_UTIL_THRESHOLDS.criticalMin}% with elevated temperature (Critical)`
+        : `≥ ${GPU_UTIL_THRESHOLDS.warningMin}% (Warning)`;
+  }
+
+  if (id === "threshold-gpu-vram" && gpu?.memory_utilization_percent != null) {
+    fields.currentValue = `${gpu.memory_utilization_percent}%`;
+    fields.thresholdCrossed = "≥ 90% (Warning)";
+  }
+
+  if (id === "threshold-gpu-power" && gpu?.power_draw_watts != null) {
+    fields.currentValue = `${gpu.power_draw_watts}W`;
+    fields.thresholdCrossed =
+      gpu.power_limit_watts != null
+        ? `≥ 95% of ${gpu.power_limit_watts}W limit (Warning)`
+        : fault.thresholdCrossed;
+  }
+
+  if (id === "threshold-nic-utilization") {
+    const primary = getPrimaryNicInterface(metrics);
+    const util = num(primary?.utilization_percent);
+    if (util != null) fields.currentValue = `${util}%`;
+    fields.thresholdCrossed = nicUtilThresholdLabel(fault.severity);
+  }
+
+  if (id === "threshold-nic-errors" || id === "threshold-nic-lh-counters") {
+    const nics = metrics?.nic || [];
+    const upNics = nics.filter((n) => String(n.link_state || "").toLowerCase() === "up");
+    const totalErr = upNics.reduce((s, n) => s + (n.rx_errors || 0) + (n.tx_errors || 0), 0);
+    if (totalErr > 0) fields.currentValue = String(totalErr);
+  }
+
+  if (id === "threshold-nic-connectivity") {
+    fields.currentValue = "Unreachable";
+    fields.thresholdCrossed = "Gateway/internet unreachable (Critical)";
+  }
+
+  if (id === "threshold-nic-link-down") {
+    fields.currentValue = "No active interface";
+    fields.thresholdCrossed = "No UP interface (Critical)";
+  }
+
+  return fields;
+}
+
+function enrichThresholdFaultList(faults, metrics, linkHealth, inventory) {
   return (faults || []).map((f) =>
-    f.source === "threshold" ? enrichThresholdFaultWithTelemetry(f, metrics) : f
+    f.source === "threshold"
+      ? enrichThresholdFaultWithTelemetry(f, metrics, linkHealth, inventory)
+      : f
   );
 }
 
@@ -961,7 +1267,7 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
         component: "CPU",
         metricName: "Fatal Errors",
         currentValue: String(cpuH.fatal_errors),
-        thresholdCrossed: "> 0 (Critical)",
+        thresholdCrossed: "≥ 1 fatal MCE (Critical)",
         description: `${cpuH.fatal_errors} fatal machine-check error(s) detected on CPU.`,
       })
     );
@@ -974,7 +1280,7 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
         component: "CPU",
         metricName: "Corrected Errors",
         currentValue: String(cpuH.corrected_errors),
-        thresholdCrossed: "> 0 (Warning)",
+        thresholdCrossed: "≥ 1 corrected MCE (Warning)",
         description: `${cpuH.corrected_errors} corrected machine-check error(s) on CPU.`,
       })
     );
@@ -987,13 +1293,13 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
         component: "CPU",
         metricName: "Thermal Throttling",
         currentValue: String(cpuThrottle),
-        thresholdCrossed: "> 0 (Warning)",
+        thresholdCrossed: "≥ 1 throttle event (Warning)",
         description: `CPU thermal throttling active (${cpuThrottle} event(s)).`,
       })
     );
   }
   if (cpuM.temperature_celsius != null) {
-    if (cpuM.temperature_celsius >= 85) {
+    if (cpuM.temperature_celsius >= CPU_TEMP_THRESHOLDS.criticalC) {
       faults.push(
         thresholdFault({
           id: "threshold-cpu-temperature",
@@ -1001,11 +1307,11 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
           component: "CPU",
           metricName: "Temperature",
           currentValue: `${cpuM.temperature_celsius}°C`,
-          thresholdCrossed: "≥ 85°C (Critical)",
+          thresholdCrossed: `≥ ${CPU_TEMP_THRESHOLDS.criticalC}°C (Critical)`,
           description: `CPU temperature ${cpuM.temperature_celsius}°C exceeds critical threshold.`,
         })
       );
-    } else if (cpuM.temperature_celsius >= 75) {
+    } else if (cpuM.temperature_celsius >= CPU_TEMP_THRESHOLDS.warningC) {
       faults.push(
         thresholdFault({
           id: "threshold-cpu-temperature",
@@ -1013,35 +1319,36 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
           component: "CPU",
           metricName: "Temperature",
           currentValue: `${cpuM.temperature_celsius}°C`,
-          thresholdCrossed: "≥ 75°C (Warning)",
+          thresholdCrossed: `≥ ${CPU_TEMP_THRESHOLDS.warningC}°C (Warning)`,
           description: `CPU temperature ${cpuM.temperature_celsius}°C exceeds warning threshold.`,
         })
       );
     }
   }
-  if (cpuM.usage_percent != null) {
-    if (cpuM.usage_percent >= 90) {
+  const cpuUtil = num(cpuM.usage_percent);
+  if (cpuUtil != null) {
+    if (cpuUtil >= CPU_UTIL_THRESHOLDS.criticalMin) {
       faults.push(
         thresholdFault({
           id: "threshold-cpu-usage",
           severity: "Critical",
           component: "CPU",
           metricName: "Usage",
-          currentValue: `${cpuM.usage_percent}%`,
-          thresholdCrossed: "≥ 90% (Critical)",
-          description: `CPU utilization at ${cpuM.usage_percent}% — saturation risk.`,
+          currentValue: `${cpuUtil}%`,
+          thresholdCrossed: cpuUtilThresholdLabel("Critical"),
+          description: `CPU utilization at ${cpuUtil}% — saturation risk.`,
         })
       );
-    } else if (cpuM.usage_percent >= 70) {
+    } else if (cpuUtil >= CPU_UTIL_THRESHOLDS.warningMin) {
       faults.push(
         thresholdFault({
           id: "threshold-cpu-usage",
           severity: "Warning",
           component: "CPU",
           metricName: "Usage",
-          currentValue: `${cpuM.usage_percent}%`,
-          thresholdCrossed: "≥ 70% (Warning)",
-          description: `CPU utilization at ${cpuM.usage_percent}% — elevated load.`,
+          currentValue: `${cpuUtil}%`,
+          thresholdCrossed: cpuUtilThresholdLabel("Warning"),
+          description: `CPU utilization at ${cpuUtil}% — elevated load.`,
         })
       );
     }
@@ -1500,6 +1807,57 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
     );
   }
 
+  if (
+    nicEval.upNics.length > 0 &&
+    nicEval.connected === false &&
+    (metrics?.system?.network_connectivity === false ||
+      metrics?.system?.connectivity === false ||
+      metrics?.system?.gateway_reachable === false ||
+      metrics?.system?.internet_reachable === false)
+  ) {
+    faults.push(
+      thresholdFault({
+        id: "threshold-nic-connectivity",
+        severity: "Critical",
+        component: "NIC",
+        metricName: "Network Connectivity",
+        currentValue: "Unreachable",
+        thresholdCrossed: "Gateway/internet unreachable (Critical)",
+        description: "Network interface is up but host connectivity probe failed.",
+      })
+    );
+  }
+
+  const primaryNic = getPrimaryNicInterface(metrics);
+  const nicUtil = num(primaryNic?.utilization_percent);
+  if (primaryNic && isLinkUp(primaryNic) && nicUtil != null) {
+    if (nicUtil >= NIC_UTIL_THRESHOLDS.criticalMin) {
+      faults.push(
+        thresholdFault({
+          id: "threshold-nic-utilization",
+          severity: "Critical",
+          component: "NIC",
+          metricName: "Link Utilization",
+          currentValue: `${nicUtil}%`,
+          thresholdCrossed: nicUtilThresholdLabel("Critical"),
+          description: `${primaryNic.name} link utilization at ${nicUtil}% — saturation risk.`,
+        })
+      );
+    } else if (nicUtil >= NIC_UTIL_THRESHOLDS.warningMin) {
+      faults.push(
+        thresholdFault({
+          id: "threshold-nic-utilization",
+          severity: "Warning",
+          component: "NIC",
+          metricName: "Link Utilization",
+          currentValue: `${nicUtil}%`,
+          thresholdCrossed: nicUtilThresholdLabel("Warning"),
+          description: `${primaryNic.name} link utilization at ${nicUtil}% — elevated load.`,
+        })
+      );
+    }
+  }
+
   const pcieArr = Array.isArray(lh.pcie) ? lh.pcie : [];
   pcieArr.forEach((d, i) => {
     const status = (d.health || {}).status;
@@ -1677,7 +2035,7 @@ export function buildFaultLog(linkHealth, inventory, metrics) {
     });
 
   const thresholdFaults = buildThresholdFaults(linkHealth, inventory, metrics);
-  const enrichedThresholds = enrichThresholdFaultList(thresholdFaults, metrics);
+  const enrichedThresholds = enrichThresholdFaultList(thresholdFaults, metrics, linkHealth, inventory);
   return mergeFaultLogs(enrichedThresholds, faults);
 }
 
@@ -1704,10 +2062,13 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
   const lh = linkHealth || {};
   const assessments = getMergedComponentAssessments(linkHealth, inventory, metrics);
   const cpuM = metrics?.cpu || {};
+  const cpuUtil = num(cpuM.usage_percent);
   const memH = (lh.memory || {}).health || {};
   const cpuH = (lh.cpu || {}).health || {};
   const gpuM = getPrimaryGpu(metrics, inventory, lh);
   const nicEval = evaluateNicHealth(lh, metrics);
+  const primaryNic = getPrimaryNicInterface(metrics);
+  const nicUtil = num(primaryNic?.utilization_percent);
   const physicalNics = nicEval.physicalNics;
   const upNics = nicEval.upNics;
   const errNicsOnUp = interfacesWithErrors(nicEval.upNics);
@@ -1756,12 +2117,22 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
         ),
         anomalyRow(
           "Load saturation",
-          cpuM.usage_percent >= 90 ? "critical" : cpuM.usage_percent >= 70 ? "warning" : "healthy",
-          cpuM.usage_percent != null ? `${cpuM.usage_percent}% utilization` : "—"
+          cpuUtil != null && cpuUtil >= CPU_UTIL_THRESHOLDS.criticalMin
+            ? "critical"
+            : cpuUtil != null && cpuUtil >= CPU_UTIL_THRESHOLDS.warningMin
+              ? "warning"
+              : "healthy",
+          cpuUtil != null
+            ? `${cpuUtil}% · warn ≥${CPU_UTIL_THRESHOLDS.warningMin}% · crit ≥${CPU_UTIL_THRESHOLDS.criticalMin}%`
+            : "—"
         ),
         anomalyRow(
           "Temperature",
-          cpuM.temperature_celsius >= 85 ? "critical" : cpuM.temperature_celsius >= 75 ? "warning" : "healthy",
+          cpuM.temperature_celsius >= CPU_TEMP_THRESHOLDS.criticalC
+            ? "critical"
+            : cpuM.temperature_celsius >= CPU_TEMP_THRESHOLDS.warningC
+              ? "warning"
+              : "healthy",
           cpuM.temperature_celsius != null ? `${cpuM.temperature_celsius}°C` : "No sensor"
         ),
       ],
@@ -1936,6 +2307,17 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
                 })
                 .join("; ")
             : "No active interface"
+        ),
+        anomalyRow(
+          "Link utilization",
+          nicUtil != null && nicUtil >= NIC_UTIL_THRESHOLDS.criticalMin
+            ? "critical"
+            : nicUtil != null && nicUtil >= NIC_UTIL_THRESHOLDS.warningMin
+              ? "warning"
+              : "healthy",
+          nicUtil != null && primaryNic
+            ? `${primaryNic.name} ${nicUtil}% · warn ≥${NIC_UTIL_THRESHOLDS.warningMin}% · crit ≥${NIC_UTIL_THRESHOLDS.criticalMin}%`
+            : "—"
         ),
         anomalyRow(
           "Connectivity",
@@ -2116,6 +2498,8 @@ export function getLinkHealthSummary(linkHealth, inventory = null, metrics = nul
 }
 
 export {
+  CPU_UTIL_THRESHOLDS,
+  CPU_TEMP_THRESHOLDS,
   GPU_TEMP_THRESHOLDS,
   GPU_UTIL_THRESHOLDS,
   gpuTemperatureLevel,

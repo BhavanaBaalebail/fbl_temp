@@ -32,7 +32,13 @@ export function RecoveryRecommendationDialog({
 
   const recommendations = analysis.recommendations || [];
   const target = analysis.target;
-  const selected = recommendations.find((r) => r.actionId === selectedId);
+  const isNicUtilization = fault?.id === "threshold-nic-utilization";
+  const visibleRecommendations = isNicUtilization
+    ? recommendations.filter((r) =>
+        ["nic.pause_process", "nic.resume_process", "nic.terminate_process"].includes(r.actionId)
+      )
+    : recommendations;
+  const selected = visibleRecommendations.find((r) => r.actionId === selectedId);
 
   return (
     <div
@@ -44,8 +50,8 @@ export function RecoveryRecommendationDialog({
         className="hw-module max-h-[90vh] w-full max-w-lg overflow-y-auto !p-5"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="font-display text-lg font-bold text-[#f1f5f9]">Recovery Recommendation</h3>
-        <p className="mt-1 text-xs text-[#64748b]">Review evidence and select an action</p>
+        <h3 className="font-display text-lg font-bold text-[#f1f5f9]">Recovery Actions</h3>
+        <p className="mt-1 text-xs text-[#64748b]">Select an action — confirmation required before execution</p>
 
         <div className="mt-4 space-y-3 rounded-lg border p-3" style={{ background: PANEL.inner, borderColor: PANEL.border }}>
           <div>
@@ -68,16 +74,31 @@ export function RecoveryRecommendationDialog({
               )}
             </div>
           )}
-          {target?.interface && (
+          {target?.process?.pid && (
+            <div className="rounded border border-[#1e293b] p-2">
+              <span className="text-[10px] font-semibold uppercase text-[#64748b]">Target process</span>
+              <p className="text-sm text-[#e2e8f0]">
+                PID {target.process.pid}
+                {target.process.name ? ` · ${target.process.name}` : ""}
+              </p>
+            </div>
+          )}
+          {target?.interface && !target?.process?.pid && !isNicUtilization && (
             <div className="rounded border border-[#1e293b] p-2">
               <span className="text-[10px] font-semibold uppercase text-[#64748b]">Network target</span>
               <p className="text-sm text-[#e2e8f0]">{target.interface}</p>
             </div>
           )}
-          {faultShowsProcessCandidates(fault) && (
+          {isNicUtilization && !target?.process?.pid && (
+            <p className="text-xs leading-relaxed text-[#f59e0b]">
+              No workload process identified yet — check the Process Candidates table. If iperf3 is
+              running, ensure CM.py can reach it via pgrep or nethogs.
+            </p>
+          )}
+          {faultShowsProcessCandidates(fault) && !target?.process?.pid && !isNicUtilization && (
             <p className="text-xs leading-relaxed text-[#64748b]">
-              Choose a process in the <strong className="text-[#94a3b8]">Process Candidates</strong> table on
-              the recovery console (all workloads ≥1% usage, not just the top consumer).
+              Choose a process in the <strong className="text-[#94a3b8]">Process Candidates</strong> table, or
+              select an interface-level action below if no workload process is identified.
             </p>
           )}
           {analysis.rca?.[0] && (
@@ -93,7 +114,7 @@ export function RecoveryRecommendationDialog({
             Recommended Actions
           </span>
           <div className="mt-2 space-y-2">
-            {recommendations.map((rec) => (
+            {visibleRecommendations.map((rec) => (
               <label
                 key={rec.actionId}
                 className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${

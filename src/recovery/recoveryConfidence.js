@@ -65,6 +65,28 @@ export function computeRecoveryConfidence(fault, evidence, playbook) {
     }
   }
 
+  if (id.includes("gpu") && !id.includes("pcie")) {
+    score += 10;
+    factors.push("GPU workload fault — process control can reduce GPU pressure.");
+    if (items.some((i) => i.label === "Top GPU Process")) {
+      score += 10;
+      factors.push("Top GPU process identified from live nvidia-smi telemetry.");
+    }
+  }
+
+  if (id.includes("nic")) {
+    score += 10;
+    factors.push("NIC workload fault — process control and interface actions can reduce network pressure.");
+    if (items.some((i) => i.label === "Top Network Process")) {
+      score += 10;
+      factors.push("Top network process identified from live nethogs telemetry.");
+    }
+    if (items.some((i) => i.label === "Primary Interface")) {
+      score += 5;
+      factors.push("Primary interface telemetry available for targeted recovery.");
+    }
+  }
+
   if (fault.severity === "Warning") {
     score += 10;
     factors.push("Warning severity — higher probability of transient condition.");

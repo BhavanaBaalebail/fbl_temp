@@ -16,12 +16,20 @@ const PANEL = {
   inner: "rgba(8, 12, 18, 0.8)",
 };
 
-export function FaultModal({ fault, onClose, connected = false, liveMetrics = null }) {
+export function FaultModal({
+  fault,
+  onClose,
+  connected = false,
+  liveMetrics = null,
+  liveLinkHealth = null,
+  liveInventory = null,
+  onRecoveryComplete,
+}) {
   if (!fault) return null;
 
   const faultForView =
     fault.source === "threshold" && liveMetrics
-      ? enrichThresholdFaultWithTelemetry(fault, liveMetrics)
+      ? enrichThresholdFaultWithTelemetry(fault, liveMetrics, liveLinkHealth, liveInventory)
       : fault;
 
   const showRecovery =
@@ -46,7 +54,7 @@ export function FaultModal({ fault, onClose, connected = false, liveMetrics = nu
               Fault Detail Console
             </h2>
             <p className="mt-1 text-sm text-[#64748b]">
-              {fault.component} · Active Fault Log · Autonomous Recovery
+              {fault.component} · Active Fault Log · Recovery Console
             </p>
           </div>
           <button
@@ -63,7 +71,11 @@ export function FaultModal({ fault, onClose, connected = false, liveMetrics = nu
           <div className="space-y-5">
             <KernelEventDetail fault={faultForView} />
             {hasRecoveryPlaybook(faultForView) ? (
-              <RecoveryConsole fault={faultForView} connected={connected} />
+              <RecoveryConsole
+                fault={faultForView}
+                connected={connected}
+                onRecoveryComplete={onRecoveryComplete}
+              />
             ) : (
               <ManualInterventionNotice />
             )}
@@ -72,18 +84,30 @@ export function FaultModal({ fault, onClose, connected = false, liveMetrics = nu
           <div className="space-y-5">
             <ThresholdFaultDetail fault={faultForView} />
             {showRecovery ? (
-              <RecoveryConsole fault={faultForView} connected={connected} />
+              <RecoveryConsole
+                fault={faultForView}
+                connected={connected}
+                onRecoveryComplete={onRecoveryComplete}
+              />
             ) : (
               <ManualInterventionNotice />
             )}
           </div>
         ) : showRecovery ? (
-          <RecoveryConsole fault={faultForView} connected={connected} />
+          <RecoveryConsole
+            fault={faultForView}
+            connected={connected}
+            onRecoveryComplete={onRecoveryComplete}
+          />
         ) : faultForView.source === "link_health" || faultForView.source === "derived" ? (
           <div className="space-y-5">
             <LiveTelemetrySummary fault={faultForView} />
             {hasRecoveryPlaybook(faultForView) ? (
-              <RecoveryConsole fault={faultForView} connected={connected} />
+              <RecoveryConsole
+                fault={faultForView}
+                connected={connected}
+                onRecoveryComplete={onRecoveryComplete}
+              />
             ) : (
               <ManualInterventionNotice />
             )}
@@ -129,6 +153,9 @@ function ManualInterventionNotice() {
 function ThresholdFaultDetail({ fault }) {
   const detail = fault.telemetryDetail || {};
   const isDiskPerf = detail.type === "disk_performance";
+  const isGpuMetrics = detail.type === "gpu_metrics";
+  const isCpuMetrics = detail.type === "cpu_metrics";
+  const isNicMetrics = detail.type === "nic_metrics";
   const severityBg =
     fault.severity === "Critical"
       ? theme.critical
@@ -149,7 +176,57 @@ function ThresholdFaultDetail({ fault }) {
         ["Threshold crossed", detail.thresholdCrossed ?? fault.thresholdCrossed ?? "—"],
         ["Status", detail.status ?? fault.status ?? "—"],
       ]
-    : [
+    : isGpuMetrics
+      ? [
+          ["Model", detail.model ?? "—"],
+          ["PCI Bus", detail.pci_bus_id ?? "—"],
+          ["Temperature", detail.temperature_celsius != null ? `${detail.temperature_celsius}°C` : "—"],
+          ["Utilization", detail.gpu_utilization_percent != null ? `${detail.gpu_utilization_percent}%` : "—"],
+          ["VRAM", detail.memory_utilization_percent != null ? `${detail.memory_utilization_percent}%` : "—"],
+          ["VRAM used", detail.memory_used_mb != null ? `${detail.memory_used_mb} MB` : "—"],
+          ["Power draw", detail.power_draw_watts != null ? `${detail.power_draw_watts} W` : "—"],
+          ["Fan", detail.fan_speed_percent != null ? `${detail.fan_speed_percent}%` : "—"],
+          ["Graphics clock", detail.graphics_clock_mhz != null ? `${detail.graphics_clock_mhz} MHz` : "—"],
+          ["PCIe link", detail.link_status ?? "—"],
+          ["Timestamp", detail.timestamp ?? fault.detected ?? "—"],
+          ["Threshold crossed", detail.thresholdCrossed ?? fault.thresholdCrossed ?? "—"],
+          ["Status", detail.status ?? fault.status ?? "—"],
+        ]
+      : isCpuMetrics
+        ? [
+            ["Usage", detail.usage_percent != null ? `${detail.usage_percent}%` : "—"],
+            ["User", detail.user_percent != null ? `${detail.user_percent}%` : "—"],
+            ["System", detail.system_percent != null ? `${detail.system_percent}%` : "—"],
+            ["IO Wait", detail.iowait_percent != null ? `${detail.iowait_percent}%` : "—"],
+            ["Load avg (1m)", detail.load_1min != null ? String(detail.load_1min) : "—"],
+            ["Current MHz", detail.current_mhz != null ? String(detail.current_mhz) : "—"],
+            ["Temperature", detail.temperature_celsius != null ? `${detail.temperature_celsius}°C` : "—"],
+            ["Timestamp", detail.timestamp ?? fault.detected ?? "—"],
+            ["Threshold crossed", detail.thresholdCrossed ?? fault.thresholdCrossed ?? "—"],
+            ["Status", detail.status ?? fault.status ?? "—"],
+          ]
+      : isNicMetrics
+        ? [
+            ["Interface", detail.interface ?? "—"],
+            ["Link state", detail.link_state ?? "—"],
+            ["Speed", detail.speed ?? "—"],
+            ["Duplex", detail.duplex ?? "—"],
+            ["RX errors", detail.rx_errors != null ? String(detail.rx_errors) : "—"],
+            ["TX errors", detail.tx_errors != null ? String(detail.tx_errors) : "—"],
+            ["RX dropped", detail.rx_dropped != null ? String(detail.rx_dropped) : "—"],
+            ["TX dropped", detail.tx_dropped != null ? String(detail.tx_dropped) : "—"],
+            ["RX throughput", detail.rx_mbps != null ? `${detail.rx_mbps} Mbps` : "—"],
+            ["TX throughput", detail.tx_mbps != null ? `${detail.tx_mbps} Mbps` : "—"],
+            ["RX utilization", detail.rx_utilization_percent != null ? `${detail.rx_utilization_percent}%` : "—"],
+            ["TX utilization", detail.tx_utilization_percent != null ? `${detail.tx_utilization_percent}%` : "—"],
+            ["Connectivity", detail.network_connectivity == null ? "—" : detail.network_connectivity ? "Reachable" : "Unreachable"],
+            ["Default route", detail.default_route_interface ?? "—"],
+            ["Top process", detail.top_process_pid ? `PID ${detail.top_process_pid} · ${detail.top_process_name || "—"} · ${detail.top_process_total_kbps ?? "—"} KB/s` : "—"],
+            ["Timestamp", detail.timestamp ?? fault.detected ?? "—"],
+            ["Threshold crossed", detail.thresholdCrossed ?? fault.thresholdCrossed ?? "—"],
+            ["Status", detail.status ?? fault.status ?? "—"],
+          ]
+      : [
         ["Metric", detail.metricName ?? fault.metricName ?? "—"],
         ["Current value", detail.currentValue ?? fault.currentValue ?? "—"],
         ["Threshold crossed", detail.thresholdCrossed ?? fault.thresholdCrossed ?? "—"],
@@ -265,7 +342,7 @@ function LiveTelemetrySummary({ fault }) {
             <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#95a7c7]">
               Status
             </div>
-            <p className="mt-1 text-white">{autoRecovered ? "Auto Recovered" : fault.status}</p>
+            <p className="mt-1 text-white">{autoRecovered ? "Recovered" : fault.status}</p>
           </div>
         </div>
       </article>

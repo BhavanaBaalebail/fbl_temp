@@ -70,13 +70,19 @@ function primaryMetricForFault(fault) {
   if (id.includes("cpu-usage")) return "cpu.usage_percent";
   if (id.includes("cpu-temperature")) return "cpu.temperature_celsius";
   if (id.includes("gpu-temperature")) return "gpu.temperature_celsius";
+  if (id.includes("gpu-utilization")) return "gpu.gpu_utilization_percent";
   if (id.includes("gpu-vram")) return "gpu.memory_utilization_percent";
+  if (id.includes("gpu-power")) return "gpu.power_draw_watts";
   if (id.includes("ram")) return "memory.usage_percent";
   if (id.includes("disk-busy")) return "disk.busy_percent";
   if (id.includes("disk-queue")) return "disk.queue_depth";
   if (id.includes("disk-latency")) return "disk.average_latency_ms";
   if (id.includes("disk-throughput")) return "disk.total_MB_per_sec";
   if (id.includes("disk-capacity")) return "disk.mount_usage";
+  if (id === "threshold-nic-utilization") return "nic.utilization_percent";
+  if (id.includes("nic-utilization")) return "nic.utilization_percent";
+  if (id.includes("nic-link-down")) return "nic.up_count";
+  if (id.includes("nic-connectivity")) return "nic.up_count";
   if (id.includes("nic")) return "nic.total_errors";
   return null;
 }

@@ -1,5 +1,5 @@
 /**
- * Autonomous Recovery Console — enterprise incident response assistant.
+ * Recovery Console — enterprise incident response assistant.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -10,7 +10,6 @@ import {
   subscribeRecoveryHistory,
 } from "../../recovery/recoveryHistoryService";
 import { StatusBadge } from "../ui/HardwareModule";
-import { RecoveryTimeline } from "./RecoveryTimeline";
 import { RecoveryRecommendationDialog } from "./RecoveryRecommendationDialog";
 import { RecoveryConfirmationDialog } from "./RecoveryConfirmationDialog";
 import { RecoveryProcessCandidates } from "./RecoveryProcessCandidates";
@@ -64,35 +63,6 @@ function formatTime(iso) {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-function compareSnapshots(before, after) {
-  if (!before || !after) return [];
-  const keys = [
-    ["cpu_usage", "CPU Usage", "%"],
-    ["cpu_temp", "CPU Temp", "°C"],
-    ["mem_usage", "Memory Usage", "%"],
-    ["mem_swap", "Swap Usage", "%"],
-    ["gpu_temp", "GPU Temp", "°C"],
-    ["gpu_util", "GPU Util", "%"],
-    ["gpu_vram", "VRAM", "%"],
-    ["gpu_power", "Power Draw", "W"],
-    ["nic_errors", "NIC Errors", ""],
-    ["nic_up", "Interfaces Up", ""],
-    ["disk_busy", "Disk Busy", "%"],
-    ["disk_queue", "Disk Queue Depth", ""],
-    ["disk_latency", "Disk Latency", " ms"],
-    ["disk_throughput", "Disk Throughput", " MB/s"],
-    ["lh_score", "Link Health Score", ""],
-  ];
-  return keys
-    .filter(([k]) => before[k] != null || after[k] != null)
-    .map(([k, label, suffix]) => ({
-      label,
-      before: before[k] != null ? `${before[k]}${suffix}` : "—",
-      after: after[k] != null ? `${after[k]}${suffix}` : "—",
-      changed: before[k] !== after[k],
-    }));
-}
-
 function levelBadgeStatus(level) {
   if (level === 1) return "healthy";
   if (level === 2) return "warning";
@@ -104,7 +74,6 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
   const [loading, setLoading] = useState(true);
   const [history, setHistory] = useState([]);
   const [executing, setExecuting] = useState(false);
-  const [timeline, setTimeline] = useState([]);
   const [result, setResult] = useState(null);
   const [showRecommendDialog, setShowRecommendDialog] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
@@ -112,11 +81,12 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
   const abortRef = useRef(null);
 
   const recoverable = hasRecoveryPlaybook(fault);
+  const analyzable = recoverable || fault.source === "threshold";
   const analysis = analysisResult?.analysis;
   const capabilities = analysisResult?.capabilities;
 
   const refreshAnalysis = useCallback(async () => {
-    if (!recoverable) {
+    if (!analyzable) {
       setLoading(false);
       return;
     }
@@ -124,13 +94,12 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
     try {
       const res = await analyzeRecovery(fault);
       setAnalysisResult(res);
-      setTimeline(res.timeline || []);
     } catch {
       setAnalysisResult(null);
     } finally {
       setLoading(false);
     }
-  }, [fault, recoverable]);
+  }, [fault, analyzable]);
 
   useEffect(() => {
     refreshAnalysis();
@@ -154,7 +123,6 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         { confirmed, level: recommendation.level },
         {
           signal: controller.signal,
-          onTimelineUpdate: setTimeline,
         }
       );
       setResult(outcome);
@@ -190,9 +158,9 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
 
   const displayStatus =
     result?.success
-      ? "Auto Recovered"
+      ? "Recovered"
       : history.some((h) => h.result === "success")
-        ? "Auto Recovered"
+        ? "Recovered"
         : fault.status;
 
   const confidence = analysis?.confidence || { percent: 0, label: "Not Available", factors: [] };
@@ -240,8 +208,8 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
         )}
         <div className="mt-3 flex flex-wrap gap-2">
           <StatusBadge status={severityStatus} label={fault.severity} />
-          {displayStatus === "Auto Recovered" && (
-            <StatusBadge status="healthy" label="Auto Recovered" />
+          {displayStatus === "Recovered" && (
+            <StatusBadge status="healthy" label="Recovered" />
           )}
           {!connected && <StatusBadge status="critical" label="Telemetry Offline" />}
         </div>
@@ -269,12 +237,15 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
             title="Process Candidates"
             subtitle="Live workloads from GET /recovery/process_candidates · pause, resume, or terminate per PID"
           />
-          <RecoveryProcessCandidates
+            <RecoveryProcessCandidates
             fault={fault}
             connected={connected}
             capabilities={capabilities}
             minPercent={processCandidatesMinPercent(processCandidatesDomainForFault(fault))}
-            onActionComplete={() => refreshAnalysis()}
+            onActionComplete={(actionResult) => {
+              refreshAnalysis();
+              onRecoveryComplete?.(actionResult);
+            }}
           />
         </section>
       )}
@@ -342,6 +313,68 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
             Unsupported actions are shown until the backend is reachable.
           </p>
         )}
+              {connected && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="hw-btn-primary px-4 py-2 text-sm font-semibold disabled:opacity-40"
+                    disabled={executing || loading}
+                    onClick={() => setShowRecommendDialog(true)}
+                  >
+                    {executing ? "Recovery In Progress…" : "Review Recovery Actions"}
+                  </button>
+                  {executing && (
+                    <button
+                      type="button"
+                      className="hw-btn-filter px-4 py-2 text-sm"
+                      onClick={() => abortRef.current?.abort()}
+                    >
+                      Abort
+                    </button>
+                  )}
+                </div>
+              )}
+              {!connected && (
+                <p className="mt-4 text-sm text-[#f59e0b]">Telemetry offline — recovery actions unavailable.</p>
+              )}
+              {result && (
+                <div
+                  className="mt-4 rounded-lg border p-4"
+                  style={{
+                    background: result.success
+                      ? "rgba(34,197,94,0.08)"
+                      : result.partial
+                        ? "rgba(245,158,11,0.08)"
+                        : "rgba(239,68,68,0.08)",
+                    borderColor: result.success
+                      ? "rgba(34,197,94,0.3)"
+                      : result.partial
+                        ? "rgba(245,158,11,0.3)"
+                        : "rgba(239,68,68,0.3)",
+                  }}
+                >
+                  <div className="flex items-center gap-2">
+                    <StatusBadge
+                      status={result.success ? "healthy" : result.partial ? "warning" : "critical"}
+                      label={
+                        result.success
+                          ? "Recovery Successful"
+                          : result.partial
+                            ? "Partially Improved"
+                            : result.aborted
+                              ? "Recovery Aborted"
+                              : "Recovery Failed"
+                      }
+                    />
+                    {result.durationMs != null && (
+                      <span className="font-mono-metrics text-xs text-[#64748b]">
+                        {formatDuration(result.durationMs)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-2 text-sm text-[#cbd5e1]">{result.reason}</p>
+                </div>
+              )}
             </>
           )}
         </section>
@@ -384,119 +417,6 @@ export function RecoveryConsole({ fault, connected = false, onRecoveryComplete }
               </ul>
             </div>
           </div>
-        </section>
-      )}
-
-      {/* Recovery Workflow */}
-      {recoverable && (
-        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
-          <SectionHeader
-            title="Recovery Workflow"
-            subtitle="Analyze → Recommend → Approve → Execute → Verify"
-          />
-
-          {!connected ? (
-            <p className="text-sm text-[#f59e0b]">Telemetry offline — cannot run recovery workflow.</p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="hw-btn-primary px-4 py-2 text-sm font-semibold disabled:opacity-40"
-                disabled={executing || loading}
-                onClick={() => setShowRecommendDialog(true)}
-              >
-                {executing ? "Recovery In Progress…" : "Review Recovery Recommendations"}
-              </button>
-              {executing && (
-                <button
-                  type="button"
-                  className="hw-btn-filter px-4 py-2 text-sm"
-                  onClick={() => abortRef.current?.abort()}
-                >
-                  Abort
-                </button>
-              )}
-            </div>
-          )}
-
-          {timeline.length > 0 && (
-            <div className="mt-4">
-              <RecoveryTimeline events={timeline} />
-            </div>
-          )}
-
-          {result && (
-            <div
-              className="mt-4 rounded-lg border p-4"
-              style={{
-                background: result.success
-                  ? "rgba(34,197,94,0.08)"
-                  : result.partial
-                    ? "rgba(245,158,11,0.08)"
-                    : "rgba(239,68,68,0.08)",
-                borderColor: result.success
-                  ? "rgba(34,197,94,0.3)"
-                  : result.partial
-                    ? "rgba(245,158,11,0.3)"
-                    : "rgba(239,68,68,0.3)",
-              }}
-            >
-              <div className="flex items-center gap-2">
-                <StatusBadge
-                  status={result.success ? "healthy" : result.partial ? "warning" : "critical"}
-                  label={
-                    result.success
-                      ? "Recovery Successful"
-                      : result.partial
-                        ? "Partially Improved"
-                        : result.aborted
-                          ? "Recovery Aborted"
-                          : "Recovery Failed"
-                  }
-                />
-                {result.durationMs != null && (
-                  <span className="font-mono-metrics text-xs text-[#64748b]">
-                    {formatDuration(result.durationMs)}
-                  </span>
-                )}
-              </div>
-              <p className="mt-2 text-sm text-[#cbd5e1]">{result.reason}</p>
-
-              {result.selectedAction && (
-                <p className="mt-2 text-xs text-[#94a3b8]">
-                  Action: {result.actionsExecuted?.[0] || result.selectedAction?.label}
-                </p>
-              )}
-
-              {result.before && result.after && (
-                <div className="mt-4 overflow-x-auto">
-                  <table className="hw-table min-w-full text-xs">
-                    <thead>
-                      <tr>
-                        <th>Metric</th>
-                        <th>Before</th>
-                        <th>After</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {compareSnapshots(result.before, result.after).map((row) => (
-                        <tr key={row.label}>
-                          <td>{row.label}</td>
-                          <td className="font-mono-metrics">{row.before}</td>
-                          <td
-                            className="font-mono-metrics"
-                            style={{ color: row.changed ? "#38bdf8" : undefined }}
-                          >
-                            {row.after}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
         </section>
       )}
 

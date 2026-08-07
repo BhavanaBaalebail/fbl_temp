@@ -4,7 +4,7 @@
  * Polls inventory, metrics, and link_health every 5 seconds.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   dashboardMetrics,
   healthRows,
@@ -37,6 +37,13 @@ export function useTelemetry() {
   const [hostname, setHostname] = useState(null);
   const [error, setError] = useState(null);
   const [rawMetrics, setRawMetrics] = useState(null);
+  const [rawLinkHealth, setRawLinkHealth] = useState(null);
+  const [rawInventory, setRawInventory] = useState(null);
+  const [pollTick, setPollTick] = useState(0);
+
+  const refreshNow = useCallback(() => {
+    setPollTick((t) => t + 1);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +60,8 @@ export function useTelemetry() {
         recordTelemetrySample(inventory, liveMetrics, linkHealth);
 
         setRawMetrics(liveMetrics);
+        setRawLinkHealth(linkHealth);
+        setRawInventory(inventory);
         setHealth(snapshot.health);
         setMetrics(snapshot.metrics);
         setSeverity(snapshot.severity);
@@ -82,7 +91,7 @@ export function useTelemetry() {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, [pollTick]);
 
   return {
     metrics,
@@ -100,5 +109,8 @@ export function useTelemetry() {
     hostname,
     error,
     rawMetrics,
+    rawLinkHealth,
+    rawInventory,
+    refreshNow,
   };
 }
