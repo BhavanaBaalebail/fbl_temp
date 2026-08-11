@@ -1,0 +1,51 @@
+Section,Field,Value
+Metadata,Title,Infrastructure Health & Incident Report
+Metadata,Generated At,2026-08-10T12:36:15.236Z
+Metadata,Interval,Last 1 Hour
+Metadata,Data Source,SQLite telemetry_history.db via /reports/data
+Metadata,Raw Samples,5
+Metadata,Report Points,1
+Metadata,Coverage Status,PARTIAL
+Metadata,Coverage Percent,0
+Metadata,Requested Start,2026-08-10T11:35:19.174665Z
+Metadata,Requested End,2026-08-10T12:35:19.174665Z
+Metadata,Available Start,2026-08-10T12:07:57.412636Z
+Metadata,Available End,2026-08-10T12:07:57.416898Z
+Metadata,Hostname,test
+Coverage,Notice,Historical telemetry is available from 2026-08-10T12:07:57.412636Z onward. No telemetry was available in the database for the earlier portion of the requested reporting period.
+
+Historical Telemetry
+timestamp,component,metric,value,severity,threshold,fault,status
+2026-08-10T12:07:00Z,CPU,usage_percent,22,,,,
+2026-08-10T12:07:00Z,CPU,temperature_celsius,50,,,,
+2026-08-10T12:07:00Z,CPU,load_1min,0.5,,,,
+2026-08-10T12:07:00Z,RAM,usage_percent,40,,,,
+2026-08-10T12:07:00Z,RAM,available_gb,8,,,,
+2026-08-10T12:07:00Z,RAM,swap_percent,0,,,,
+2026-08-10T12:07:00Z,NIC,utilization_percent,5,,,,
+2026-08-10T12:07:00Z,NIC,rx_mbps,1,,,,
+2026-08-10T12:07:00Z,NIC,tx_mbps,1,,,,
+2026-08-10T12:07:00Z,NIC,errors,0,,,,
+2026-08-10T12:07:00Z,DISK,busy_percent,10,,,,
+2026-08-10T12:07:00Z,IO,throughput_mb_s,5,,,,
+2026-08-10T12:07:00Z,IO,iops,100,,,,
+2026-08-10T12:07:00Z,IO,queue_depth,1,,,,
+2026-08-10T12:07:00Z,IO,latency_ms,0.5,,,,
+
+Recovery History
+timestamp,eventType,eventId,component,severity,metric,value,threshold,action,result,status,process,pid,faultEventId,verification,remarks
+2026-08-10T12:26:15.230Z,recovery,RA-001,GPU,,,,,gpu.terminate_process,success,Completed,gpu-workload,4242,,process terminated,Recovery action recorded without a corresponding fault event in the selected historical fault table.
+
+Infrastructure Timeline
+timestamp,eventType,eventId,component,severity,metric,value,threshold,action,result
+"8/10/2026, 5:56:15 PM",RECOVERY,RA-001,GPU,Success,,,,RA-001: gpu.terminate_process,PID 4242; result success; verification process terminated
+
+Activity Summary
+category,count,firstEvent,lastEvent,highestSeverity,recoveryActions,result
+Faults,0,—,—,None,0,No faults
+Warnings,0,—,—,None,0,None
+Criticals,0,—,—,None,0,None
+Recoveries,1,2026-08-10T12:26:15.230Z,2026-08-10T12:26:15.230Z,Success,1,See recovery log
+Significant Spikes,0,—,—,None,0,No significant spikes
+Connectivity Events,0,—,—,None,0,Healthy / no events
+Digital Twin Simulations,0,—,—,None,0,None

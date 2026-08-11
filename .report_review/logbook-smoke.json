@@ -1,0 +1,596 @@
+{
+  "reportMetadata": {
+    "title": "Infrastructure Health & Incident Report",
+    "reportId": "HMR-MSN7TL38",
+    "generatedAt": "2026-08-10T12:36:15.236Z",
+    "generatedBy": "smoke-test",
+    "intervalLabel": "Last 1 Hour",
+    "dataSource": "SQLite telemetry_history.db via /reports/data",
+    "database": "/Users/bhavanabaalebail/Downloads/fbl_temp-main 2/telemetry_history.db",
+    "rawSampleCount": 5,
+    "reportPointCount": 1
+  },
+  "reportPeriod": {
+    "range": "1h",
+    "label": "Last 1 Hour",
+    "requestedStart": 1786361719.174665,
+    "requestedEnd": 1786365319.174665,
+    "requestedStartIso": "2026-08-10T11:35:19.174665Z",
+    "requestedEndIso": "2026-08-10T12:35:19.174665Z",
+    "availableStart": 1786363677.4126358,
+    "availableEnd": 1786363677.416898,
+    "availableStartIso": "2026-08-10T12:07:57.412636Z",
+    "availableEndIso": "2026-08-10T12:07:57.416898Z"
+  },
+  "dataCoverage": {
+    "status": "PARTIAL",
+    "notice": "Historical telemetry is available from 2026-08-10T12:07:57.412636Z onward. No telemetry was available in the database for the earlier portion of the requested reporting period.",
+    "requestedLabel": "Last 1 Hour",
+    "requestedStart": 1786361719.174665,
+    "requestedEnd": 1786365319.174665,
+    "requestedStartIso": "2026-08-10T11:35:19.174665Z",
+    "requestedEndIso": "2026-08-10T12:35:19.174665Z",
+    "availableStart": 1786363677.4126358,
+    "availableEnd": 1786363677.416898,
+    "availableStartIso": "2026-08-10T12:07:57.412636Z",
+    "availableEndIso": "2026-08-10T12:07:57.416898Z",
+    "databaseStart": 1786355008.305546,
+    "databaseEnd": 1786363677.416898,
+    "databaseStartIso": "2026-08-10T09:43:28.305546Z",
+    "databaseEndIso": "2026-08-10T12:07:57.416898Z",
+    "requestedSeconds": 3600,
+    "availableSeconds": 0.004262208938598633,
+    "missingSeconds": 3599.9957377910614,
+    "coveragePercent": 0,
+    "coverageDurationLabel": "0s",
+    "requestedDurationLabel": "1h 0m",
+    "rawSampleCount": 5,
+    "reportPointCount": 1,
+    "telemetrySampleCount": 5,
+    "faultEventCount": 0,
+    "recoveryEventCount": 1,
+    "digitalTwinCount": 0,
+    "retentionDays": 30,
+    "incomplete": true,
+    "empty": false
+  },
+  "componentSummary": [
+    {
+      "component": "CPU",
+      "status": "healthy",
+      "avg": "22.00%",
+      "peak": "22.00%",
+      "min": "22.00%",
+      "thresholdLabel": "warn >=80% | crit >=90%",
+      "warnings": 0,
+      "criticals": 0,
+      "trend": "Stable"
+    },
+    {
+      "component": "GPU",
+      "status": "nodata",
+      "avg": "—",
+      "peak": "—",
+      "min": "—",
+      "thresholdLabel": "warn >=90% | crit >=97%",
+      "warnings": 0,
+      "criticals": 0,
+      "trend": "—"
+    },
+    {
+      "component": "RAM",
+      "status": "healthy",
+      "avg": "40.00%",
+      "peak": "40.00%",
+      "min": "40.00%",
+      "thresholdLabel": "warn >=80% | crit >=90%",
+      "warnings": 0,
+      "criticals": 0,
+      "trend": "Stable"
+    },
+    {
+      "component": "DISK",
+      "status": "healthy",
+      "avg": "10.00%",
+      "peak": "10.00%",
+      "min": "10.00%",
+      "thresholdLabel": "warn >=25% | crit >=50%",
+      "warnings": 0,
+      "criticals": 0,
+      "trend": "Stable"
+    },
+    {
+      "component": "NIC",
+      "status": "healthy",
+      "avg": "5.00%",
+      "peak": "5.00%",
+      "min": "5.00%",
+      "thresholdLabel": "warn >=10% | crit >=20%",
+      "warnings": 0,
+      "criticals": 0,
+      "trend": "Stable"
+    },
+    {
+      "component": "IO",
+      "status": "healthy",
+      "avg": "5.00 MB/s",
+      "peak": "5.00 MB/s",
+      "min": "5.00 MB/s",
+      "thresholdLabel": "warn >=50 MB/s | crit >=150 MB/s",
+      "warnings": 0,
+      "criticals": 0,
+      "trend": "Stable"
+    }
+  ],
+  "componentSections": [
+    {
+      "name": "CPU",
+      "status": "healthy",
+      "stats": {
+        "avg": 22,
+        "min": 22,
+        "max": 22,
+        "current": 22,
+        "trend": "Stable",
+        "count": 1
+      },
+      "latestRecorded": [
+        [
+          "Usage",
+          "22.00%"
+        ],
+        [
+          "Temperature",
+          "50.00°C"
+        ],
+        [
+          "Load 1m",
+          "0.50"
+        ],
+        [
+          "User",
+          "—"
+        ],
+        [
+          "System",
+          "—"
+        ]
+      ],
+      "thresholds": "warn >=80% | crit >=90%",
+      "interpretation": "CPU averaged 22.00% over the available window (min 22.00%, peak 22.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=80%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "peakAt": "8/10/2026, 5:37:00 PM",
+      "charts": []
+    },
+    {
+      "name": "GPU",
+      "status": "nodata",
+      "stats": {
+        "avg": null,
+        "min": null,
+        "max": null,
+        "current": null,
+        "trend": "—",
+        "count": 0
+      },
+      "latestRecorded": [
+        [
+          "Utilization",
+          "—"
+        ],
+        [
+          "VRAM",
+          "—"
+        ],
+        [
+          "Temperature",
+          "—"
+        ],
+        [
+          "Power",
+          "—"
+        ],
+        [
+          "Model",
+          "—"
+        ]
+      ],
+      "thresholds": "warn >=90% | crit >=97%",
+      "interpretation": "No historical GPU telemetry was available in SQLite for the selected reporting period.",
+      "peakAt": null,
+      "charts": []
+    },
+    {
+      "name": "RAM",
+      "status": "healthy",
+      "stats": {
+        "avg": 40,
+        "min": 40,
+        "max": 40,
+        "current": 40,
+        "trend": "Stable",
+        "count": 1
+      },
+      "latestRecorded": [
+        [
+          "Usage",
+          "40.00%"
+        ],
+        [
+          "Available",
+          "8.00 GB"
+        ],
+        [
+          "Used",
+          "—"
+        ],
+        [
+          "Total",
+          "—"
+        ],
+        [
+          "Swap",
+          "0.00%"
+        ]
+      ],
+      "thresholds": "warn >=80% | crit >=90%",
+      "interpretation": "RAM averaged 40.00% over the available window (min 40.00%, peak 40.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=80%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "peakAt": "8/10/2026, 5:37:00 PM",
+      "charts": []
+    },
+    {
+      "name": "DISK",
+      "status": "healthy",
+      "stats": {
+        "avg": 10,
+        "min": 10,
+        "max": 10,
+        "current": 10,
+        "trend": "Stable",
+        "count": 1
+      },
+      "latestRecorded": [
+        [
+          "Busy",
+          "10.00%"
+        ],
+        [
+          "Throughput",
+          "5.00 MB/s"
+        ],
+        [
+          "IOPS",
+          "100"
+        ],
+        [
+          "Latency",
+          "0.50 ms"
+        ],
+        [
+          "Queue",
+          "1.00"
+        ],
+        [
+          "Device",
+          "sda"
+        ]
+      ],
+      "thresholds": "warn >=25% | crit >=50%",
+      "interpretation": "DISK averaged 10.00% over the available window (min 10.00%, peak 10.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=25%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "peakAt": "8/10/2026, 5:37:00 PM",
+      "charts": []
+    },
+    {
+      "name": "NIC",
+      "status": "healthy",
+      "stats": {
+        "avg": 5,
+        "min": 5,
+        "max": 5,
+        "current": 5,
+        "trend": "Stable",
+        "count": 1
+      },
+      "latestRecorded": [
+        [
+          "Utilization",
+          "5.00%"
+        ],
+        [
+          "RX",
+          "1.00 Mbps"
+        ],
+        [
+          "TX",
+          "1.00 Mbps"
+        ],
+        [
+          "Errors",
+          "0"
+        ],
+        [
+          "Links Up",
+          "—"
+        ]
+      ],
+      "thresholds": "warn >=10% | crit >=20%",
+      "interpretation": "NIC averaged 5.00% over the available window (min 5.00%, peak 5.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=10%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "peakAt": "8/10/2026, 5:37:00 PM",
+      "charts": []
+    },
+    {
+      "name": "IO",
+      "status": "healthy",
+      "stats": {
+        "avg": 5,
+        "min": 5,
+        "max": 5,
+        "current": 5,
+        "trend": "Stable",
+        "count": 1
+      },
+      "latestRecorded": [
+        [
+          "Throughput",
+          "5.00 MB/s"
+        ],
+        [
+          "IOPS",
+          "100"
+        ],
+        [
+          "Queue",
+          "1.00"
+        ],
+        [
+          "Latency",
+          "0.50 ms"
+        ],
+        [
+          "Device",
+          "sda"
+        ]
+      ],
+      "thresholds": "warn >=50 MB/s | crit >=150 MB/s",
+      "interpretation": "IO averaged 5.00 MB/s over the available window (min 5.00 MB/s, peak 5.00 MB/s). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=50 MB/s). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "peakAt": "8/10/2026, 5:37:00 PM",
+      "charts": []
+    }
+  ],
+  "historicalTelemetry": [
+    {
+      "timestamp": "2026-08-10T12:07:00Z",
+      "collected_at": 1786363620,
+      "cpu_usage": 22,
+      "cpu_temp": 50,
+      "mem_usage": 40,
+      "mem_available_gb": 8,
+      "gpu_util": null,
+      "gpu_vram": null,
+      "gpu_temp": null,
+      "nic_util": 5,
+      "nic_rx": 1,
+      "nic_tx": 1,
+      "io_busy": 10,
+      "io_total_mbps": 5,
+      "io_iops": 100,
+      "io_queue": 1,
+      "io_latency": 0.5,
+      "lh_score": 90
+    }
+  ],
+  "graphSeries": {
+    "systemResourceTrend": {
+      "title": "System Resource Utilization (CPU / RAM / GPU %)",
+      "unit": "%",
+      "yLabel": "Utilization (%)",
+      "series": [],
+      "compatible": true
+    },
+    "byComponent": {
+      "CPU": [],
+      "GPU": [],
+      "RAM": [],
+      "DISK": [],
+      "NIC": [],
+      "IO": []
+    },
+    "eventMarkers": {
+      "faults": [],
+      "recoveries": [
+        {
+          "t": 1786364775230,
+          "component": "GPU",
+          "id": "RA-001",
+          "label": "RA-001",
+          "result": "success",
+          "action": "gpu.terminate_process"
+        }
+      ]
+    }
+  },
+  "faultEvents": [],
+  "recoveryEvents": [
+    {
+      "time": "8/10/2026, 5:56:15 PM",
+      "timestamp": "2026-08-10T12:26:15.230Z",
+      "t": 1786364775230,
+      "collected_at": 1786364775.23,
+      "component": "GPU",
+      "action": "gpu.terminate_process",
+      "pid": "4242",
+      "process": "gpu-workload",
+      "result": "success",
+      "verification": "process terminated",
+      "status": "Completed",
+      "remarks": "Process terminated; GPU utilization confirmed decreasing",
+      "success": true,
+      "message": "Process terminated; GPU utilization confirmed decreasing",
+      "trigger": "Recorded recovery",
+      "faultHint": null,
+      "duration_seconds": null,
+      "recoveryId": "RA-001",
+      "eventType": "recovery",
+      "faultEventId": null,
+      "correlation": "Recovery action recorded without a corresponding fault event in the selected historical fault table."
+    }
+  ],
+  "significantEvents": [],
+  "infrastructureTimeline": [
+    {
+      "t": 1786364775230,
+      "timestamp": "8/10/2026, 5:56:15 PM",
+      "kind": "RECOVERY",
+      "severity": "Success",
+      "component": "GPU",
+      "label": "RA-001: gpu.terminate_process",
+      "detail": "PID 4242; result success; verification process terminated",
+      "id": "RA-001",
+      "faultEventId": null
+    }
+  ],
+  "faultRecoveryChains": [
+    {
+      "faultId": null,
+      "component": "GPU",
+      "steps": [
+        {
+          "stage": "Recovery Action",
+          "detail": "RA-001 gpu.terminate_process"
+        },
+        {
+          "stage": "Correlation",
+          "detail": "Recovery action recorded without a corresponding fault event in the selected historical fault table."
+        },
+        {
+          "stage": "Verification",
+          "detail": "process terminated"
+        },
+        {
+          "stage": "Final Status",
+          "detail": "SUCCESS"
+        }
+      ]
+    }
+  ],
+  "activitySummary": [
+    {
+      "category": "Faults",
+      "count": 0,
+      "firstEvent": "—",
+      "lastEvent": "—",
+      "highestSeverity": "None",
+      "recoveryActions": 0,
+      "result": "No faults"
+    },
+    {
+      "category": "Warnings",
+      "count": 0,
+      "firstEvent": "—",
+      "lastEvent": "—",
+      "highestSeverity": "None",
+      "recoveryActions": 0,
+      "result": "None"
+    },
+    {
+      "category": "Criticals",
+      "count": 0,
+      "firstEvent": "—",
+      "lastEvent": "—",
+      "highestSeverity": "None",
+      "recoveryActions": 0,
+      "result": "None"
+    },
+    {
+      "category": "Recoveries",
+      "count": 1,
+      "firstEvent": "2026-08-10T12:26:15.230Z",
+      "lastEvent": "2026-08-10T12:26:15.230Z",
+      "highestSeverity": "Success",
+      "recoveryActions": 1,
+      "result": "See recovery log"
+    },
+    {
+      "category": "Significant Spikes",
+      "count": 0,
+      "firstEvent": "—",
+      "lastEvent": "—",
+      "highestSeverity": "None",
+      "recoveryActions": 0,
+      "result": "No significant spikes"
+    },
+    {
+      "category": "Connectivity Events",
+      "count": 0,
+      "firstEvent": "—",
+      "lastEvent": "—",
+      "highestSeverity": "None",
+      "recoveryActions": 0,
+      "result": "Healthy / no events"
+    },
+    {
+      "category": "Digital Twin Simulations",
+      "count": 0,
+      "firstEvent": "—",
+      "lastEvent": "—",
+      "highestSeverity": "None",
+      "recoveryActions": 0,
+      "result": "None"
+    }
+  ],
+  "digitalTwinEvents": [],
+  "visualAnalysis": [
+    {
+      "component": "CPU",
+      "commentary": "CPU averaged 22.00% over the available window (min 22.00%, peak 22.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=80%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "average": 22,
+      "peak": 22,
+      "minimum": 22
+    },
+    {
+      "component": "GPU",
+      "commentary": "No historical GPU telemetry was available in SQLite for the selected reporting period.",
+      "average": null,
+      "peak": null,
+      "minimum": null
+    },
+    {
+      "component": "RAM",
+      "commentary": "RAM averaged 40.00% over the available window (min 40.00%, peak 40.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=80%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "average": 40,
+      "peak": 40,
+      "minimum": 40
+    },
+    {
+      "component": "DISK",
+      "commentary": "DISK averaged 10.00% over the available window (min 10.00%, peak 10.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=25%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "average": 10,
+      "peak": 10,
+      "minimum": 10
+    },
+    {
+      "component": "NIC",
+      "commentary": "NIC averaged 5.00% over the available window (min 5.00%, peak 5.00%). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=10%). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "average": 5,
+      "peak": 5,
+      "minimum": 5
+    },
+    {
+      "component": "IO",
+      "commentary": "IO averaged 5.00 MB/s over the available window (min 5.00 MB/s, peak 5.00 MB/s). Peak occurred at 8/10/2026, 5:37:00 PM. Peak remained below the warning threshold (>=50 MB/s). No threshold spike or fault markers were correlated for this component. Trend: Stable.",
+      "average": 5,
+      "peak": 5,
+      "minimum": 5
+    }
+  ],
+  "spikes": [],
+  "recommendations": {
+    "immediate": [],
+    "preventive": [],
+    "monitoring": [
+      "Coverage is PARTIAL (0%): available window is 0s of 1h 0m requested. Do not treat missing days as healthy.",
+      "Continue SQLite retention monitoring: 1 report points / 5 raw samples in this window.",
+      "No critical or warning component peaks required immediate action in the available historical window."
+    ]
+  },
+  "gaps": []
+}

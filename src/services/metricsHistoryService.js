@@ -1,7 +1,7 @@
 /**
  * Metrics History Service
- * Accumulates telemetry samples during the browser session for report generation.
- * No backend history API exists — samples are recorded on each live poll.
+ * Accumulates live telemetry samples during the browser session for dashboard UX.
+ * Report Generation does NOT use this store — reports query SQLite via /reports/data.
  */
 
 import { buildTelemetrySnapshot } from "./linuxMetricsService";

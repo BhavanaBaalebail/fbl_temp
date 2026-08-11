@@ -8,8 +8,10 @@ import { theme } from "../../utils/theme";
 const REPORT_TYPES = [
   { key: "snapshot", label: "Current System Snapshot" },
   { key: "1h", label: "Last 1 Hour" },
+  { key: "6h", label: "Last 6 Hours" },
   { key: "24h", label: "Last 24 Hours" },
   { key: "7d", label: "Last 7 Days" },
+  { key: "30d", label: "Last 30 Days" },
   { key: "custom", label: "Custom Time Range" },
 ];
 
@@ -133,9 +135,9 @@ export function ReportConfiguration({ config, updateConfig, sampleCount, connect
 
       <p className="mt-3 font-mono-metrics text-xs text-[#64748b]">
         {sampleCount > 0
-          ? `${sampleCount} telemetry sample${sampleCount === 1 ? "" : "s"} buffered this session.`
-          : "Samples accumulate while telemetry is connected."}
-        {!connected && " · Telemetry offline — sections with no data will be omitted."}
+          ? `${sampleCount} historical sample${sampleCount === 1 ? "" : "s"} loaded from SQLite for this period.`
+          : "Historical samples are loaded from the monitoring server database (not browser session)."}
+        {!connected && " · Live telemetry offline — historical reports still use SQLite when the API is reachable."}
       </p>
     </HardwareModule>
   );

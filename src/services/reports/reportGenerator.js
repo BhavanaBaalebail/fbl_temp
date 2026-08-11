@@ -1,5 +1,6 @@
 /**
  * Report generation orchestrator with progress workflow.
+ * Historical data is fetched from SQLite via /reports/data.
  */
 
 import { buildReportData } from "./reportDataBuilder";
@@ -44,16 +45,18 @@ function delay(ms) {
 export async function generateReport(config, formats, onProgress) {
   const steps = GENERATION_STEPS.length;
 
-  for (let i = 0; i < steps - 1; i += 1) {
+  onProgress?.(0, "active");
+  const reportData = await buildReportData(config);
+  reportData.generatedAt = new Date();
+  onProgress?.(0, "done");
+
+  for (let i = 1; i < steps - 1; i += 1) {
     onProgress?.(i, "active");
-    await delay(350 + i * 80);
+    await delay(200 + i * 40);
     onProgress?.(i, "done");
   }
 
   onProgress?.(steps - 1, "active");
-
-  const reportData = buildReportData(config);
-  reportData.generatedAt = new Date();
 
   const outputs = {};
   let primaryPageCount = null;
@@ -116,7 +119,7 @@ export function downloadFromHistoryEntry(entry, format) {
 
 /** Backward-compatible one-click PDF download */
 export async function downloadPerformanceReport(intervalKey) {
-  const reportData = buildReportData({ intervalKey });
+  const reportData = await buildReportData({ intervalKey });
   const result = exportReportPdf(reportData);
   downloadBlob(result.blob, result.filename);
   return { filename: result.filename, reportData };

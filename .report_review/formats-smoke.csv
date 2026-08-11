@@ -1,0 +1,22 @@
+Section,Field,Value
+Metadata,Title,Infrastructure Health & Incident Report
+Metadata,Generated At,2026-08-10T12:27:09.821Z
+Metadata,Interval,Last 1 Hour
+Metadata,Data Source,SQLite telemetry_history.db via /reports/data
+Metadata,Raw Samples,12
+Metadata,Report Points,2
+Metadata,Coverage Status,PARTIAL
+Metadata,Coverage Percent,50
+Metadata,Requested Start,a
+Metadata,Requested End,b
+Metadata,Available Start,c
+Metadata,Available End,d
+Metadata,Hostname,h
+Coverage,Notice,partial
+
+Historical Telemetry
+timestamp,component,metric,value,severity,threshold,fault,status
+2026-08-10T12:25:09.816Z,CPU,usage_percent,2,,,,
+2026-08-10T12:25:09.816Z,RAM,usage_percent,20,,,,
+2026-08-10T12:27:09.816Z,CPU,usage_percent,3,,,,
+2026-08-10T12:27:09.816Z,RAM,usage_percent,21,,,,

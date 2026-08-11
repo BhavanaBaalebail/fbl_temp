@@ -1,5 +1,5 @@
 /**
- * Reports hook — WYSIWYG preview from generated document blobs
+ * Reports hook — SQLite historical reports via /reports/data
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
@@ -21,7 +21,6 @@ import {
   deleteReportHistoryEntry,
   formatFileSize,
 } from "../services/reports/reportHistoryManager";
-import { getSampleCount } from "../services/metricsHistoryService";
 
 const DEFAULT_CONFIG = {
   intervalKey: "1h",
@@ -33,6 +32,7 @@ const DEFAULT_CONFIG = {
 
 const ALL_FORMATS = SUPPORTED_FORMATS.filter((f) => f.supported).map((f) => f.id);
 const AUTO_REGEN_MS = 1200;
+const PREVIEW_FETCH_MS = 600;
 
 function configSignature(config, sectionSelection) {
   return JSON.stringify({ config, sectionSelection });
@@ -53,19 +53,43 @@ export function useReports() {
   const [fitMode, setFitMode] = useState("width");
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+  const [previewReportData, setPreviewReportData] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [historySampleCount, setHistorySampleCount] = useState(0);
 
   const lastGeneratedSig = useRef(null);
   const autoGenTimer = useRef(null);
+  const previewTimer = useRef(null);
   const generateRef = useRef(null);
+  const previewSeq = useRef(0);
 
   useEffect(() => subscribeReportHistory(setHistory), []);
 
-  const previewReportData = useMemo(() => {
-    try {
-      return buildReportData({ ...config, sections: sectionSelection });
-    } catch {
-      return null;
-    }
+  // Preview data from SQLite (debounced) — never sessionStorage
+  useEffect(() => {
+    if (previewTimer.current) clearTimeout(previewTimer.current);
+    previewTimer.current = setTimeout(async () => {
+      const seq = ++previewSeq.current;
+      setPreviewLoading(true);
+      try {
+        const data = await buildReportData({ ...config, sections: sectionSelection });
+        if (seq !== previewSeq.current) return;
+        setPreviewReportData(data);
+        setHistorySampleCount(data.sampleCount || data.telemetryRawCount || 0);
+        setError(null);
+      } catch (err) {
+        if (seq !== previewSeq.current) return;
+        setPreviewReportData(null);
+        setHistorySampleCount(0);
+        setError(err?.message || "Failed to load historical telemetry");
+      } finally {
+        if (seq === previewSeq.current) setPreviewLoading(false);
+      }
+    }, PREVIEW_FETCH_MS);
+
+    return () => {
+      if (previewTimer.current) clearTimeout(previewTimer.current);
+    };
   }, [config, sectionSelection]);
 
   const availableSections = useMemo(
@@ -97,8 +121,6 @@ export function useReports() {
   }, [markStale]);
 
   const handleGenerate = useCallback(async () => {
-    if (availableSections.length === 0) return;
-
     setGenerating(true);
     setError(null);
     setProgressSteps(GENERATION_STEPS.map((s) => ({ ...s, status: "pending" })));
@@ -117,6 +139,8 @@ export function useReports() {
         onProgress
       );
       setGenerationResult(result);
+      setPreviewReportData(result.reportData);
+      setHistorySampleCount(result.reportData?.sampleCount || 0);
       lastGeneratedSig.current = currentSig;
       setIsStale(false);
       if (result.pageCount) setTotalPages(result.pageCount);
@@ -126,7 +150,7 @@ export function useReports() {
     } finally {
       setGenerating(false);
     }
-  }, [config, sectionSelection, availableSections.length, currentSig]);
+  }, [config, sectionSelection, currentSig]);
 
   generateRef.current = handleGenerate;
 
@@ -135,7 +159,6 @@ export function useReports() {
   }, [currentSig, markStale]);
 
   useEffect(() => {
-    if (availableSections.length === 0) return undefined;
     if (!lastGeneratedSig.current) return undefined;
 
     if (autoGenTimer.current) clearTimeout(autoGenTimer.current);
@@ -148,7 +171,7 @@ export function useReports() {
     return () => {
       if (autoGenTimer.current) clearTimeout(autoGenTimer.current);
     };
-  }, [currentSig, availableSections.length]);
+  }, [currentSig]);
 
   const handlePreviewFormatChange = useCallback((format) => {
     setPreviewFormat(format);
@@ -204,7 +227,9 @@ export function useReports() {
     removeHistory,
     metadataEntry,
     setMetadataEntry,
-    sampleCount: getSampleCount(),
+    sampleCount: historySampleCount,
+    previewLoading,
+    previewReportData,
     formatFileSize,
     isStale,
     zoom,

@@ -92,7 +92,7 @@ export function ReportsPage({ connected, loading }) {
             generating={reports.generating}
             onGenerate={reports.handleGenerate}
             onDownload={reports.downloadResult}
-            canGenerate={!loading && reports.availableSections.length > 0}
+            canGenerate={!loading && !reports.generating}
             isStale={reports.isStale}
             error={reports.error}
           />

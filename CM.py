@@ -151,7 +151,6 @@ from typing import Any, Callable, Optional
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-import psutil
 import telemetry_db
 
 
@@ -5163,48 +5162,6 @@ def _disk_terminate_process(p):
     return res
 
 
-
-
-# ---- I/O handlers (storage I/O workload recovery) ----------------------------
-# Same SIGSTOP / SIGCONT / SIGTERM pattern as disk/cpu/gpu/nic process actions.
-# Wired into RECOVERY_ACTIONS so /recovery/execute records history + verifies.
-# Dedicated /recovery/io/* routes below are thin wrappers over these handlers.
-
-
-def _io_pause_process(p):
-    pid = p["pid"] if isinstance(p, dict) else p
-    res = _recovery_signal(pid, signal.SIGSTOP, verify_stopped=True)
-    res["success"] = res["success"] and res["verified"]
-    res["message"] = (
-        f"I/O process {pid} paused (SIGSTOP) -- {res['verification']}."
-        if res["success"] else (res.get("verification") or res.get("stderr") or "pause failed")
-    )
-    return res
-
-
-def _io_resume_process(p):
-    pid = p["pid"] if isinstance(p, dict) else p
-    res = _recovery_signal(pid, signal.SIGCONT, verify_stopped=False)
-    res["success"] = res["success"] and res["verified"]
-    res["message"] = (
-        f"I/O process {pid} resumed (SIGCONT) -- {res['verification']}."
-        if res["success"] else (res.get("verification") or res.get("stderr") or "resume failed")
-    )
-    return res
-
-
-def _io_terminate_process(p):
-    pid = p["pid"] if isinstance(p, dict) else p
-    logger.info("io.terminate_process: backend received pid=%s", pid)
-    res = _recovery_signal(pid, signal.SIGTERM, verify_gone=True)
-    res["success"] = res["success"] and res["verified"]
-    res["message"] = (
-        f"I/O process {pid} terminated (SIGTERM) -- {res['verification']}."
-        if res["success"] else (res.get("verification") or res.get("stderr") or "terminate failed")
-    )
-    return res
-
-
 # ---- NIC handlers ------------------------------------------------------------
 # Two tiers, mirroring cpu/gpu/ram/disk:
 #   * process-level: pause/resume/terminate/kill whatever PID is actually
@@ -5399,16 +5356,6 @@ RECOVERY_ACTIONS: dict[str, dict[str, Any]] = {
     "disk.terminate_process": {"handler": _disk_terminate_process, "level": 3, "domain": "disk",
                                 "required_params": ["pid"], "supported_check": _recovery_always_supported,
                                 "description": "Gracefully terminate a disk I/O-heavy process (SIGTERM)."},
-
-    "io.pause_process": {"handler": _io_pause_process, "level": 2, "domain": "io",
-                          "required_params": ["pid"], "supported_check": _recovery_always_supported,
-                          "description": "Suspend an I/O-heavy process (SIGSTOP)."},
-    "io.resume_process": {"handler": _io_resume_process, "level": 1, "domain": "io",
-                           "required_params": ["pid"], "supported_check": _recovery_always_supported,
-                           "description": "Resume a paused I/O-heavy process (SIGCONT)."},
-    "io.terminate_process": {"handler": _io_terminate_process, "level": 3, "domain": "io",
-                              "required_params": ["pid"], "supported_check": _recovery_always_supported,
-                              "description": "Gracefully terminate an I/O-heavy process (SIGTERM)."},
 
     # --- NIC: process-level (Trial6) ---
     "nic.pause_process": {"handler": _nic_pause_process, "level": 2, "domain": "nic",
@@ -5714,19 +5661,6 @@ def get_recovery_process_candidates(domain: str = "cpu", min_percent: float = 1.
                 **proc,
                 "usage_percent": kbps,
                 "recoverable": ok,
-                "reason": None if ok else reason,
-            })
-    elif domain == "io":
-        # min_percent is interpreted as MB/s floor (same units as /recovery/io/process_candidates).
-        min_mb = float(min_percent) if min_percent is not None else _IO_MIN_MB_PER_SEC
-        for proc in get_io_process_candidates(min_mb_per_sec=min_mb, limit=max(limit, 50)):
-            total_mb = proc.get("total_MB_per_sec") or 0.0
-            pid = proc.get("pid")
-            ok, reason, _ = validate_pid(pid) if pid is not None else (False, "invalid pid", None)
-            candidates.append({
-                **proc,
-                "usage_percent": total_mb,
-                "recoverable": ok if proc.get("recoverable", True) else False,
                 "reason": None if ok else reason,
             })
     elif domain == "nic":
@@ -6126,11 +6060,21 @@ def recovery_history_endpoint():
 
 @app.route("/db/telemetry_history")
 def db_telemetry_history_endpoint():
+    """Historical telemetry from SQLite.
+
+    Query params:
+      start, end  — Unix epoch seconds/ms or ISO-8601 UTC
+      range       — 1h | 6h | 24h | 7d | 30d  (used when start omitted)
+      limit       — max rows (default 5000)
+    """
     start = request.args.get("start")
     end = request.args.get("end")
+    range_key = request.args.get("range")
     limit = request.args.get("limit", default=5000, type=int)
     try:
-        samples = telemetry_db.query_telemetry_history(start=start, end=end, limit=limit)
+        samples = telemetry_db.query_telemetry_history(
+            start=start, end=end, range_key=range_key, limit=limit
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to query telemetry history from database")
         return jsonify({"error": str(exc), "samples": [], "count": 0}), 500
@@ -6141,9 +6085,12 @@ def db_telemetry_history_endpoint():
 def db_fault_history_endpoint():
     start = request.args.get("start")
     end = request.args.get("end")
+    range_key = request.args.get("range")
     limit = request.args.get("limit", default=5000, type=int)
     try:
-        faults = telemetry_db.query_fault_history(start=start, end=end, limit=limit)
+        faults = telemetry_db.query_fault_history(
+            start=start, end=end, range_key=range_key, limit=limit
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to query fault history from database")
         return jsonify({"error": str(exc), "faults": [], "count": 0}), 500
@@ -6152,13 +6099,73 @@ def db_fault_history_endpoint():
 
 @app.route("/db/recovery_history_full")
 def db_recovery_history_full_endpoint():
+    start = request.args.get("start")
+    end = request.args.get("end")
+    range_key = request.args.get("range")
     limit = request.args.get("limit", default=10000, type=int)
     try:
-        history = telemetry_db.query_recovery_history_full(limit=limit)
+        history = telemetry_db.query_recovery_history_full(
+            start=start, end=end, range_key=range_key, limit=limit
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to query full recovery history from database")
         return jsonify({"error": str(exc), "history": [], "count": 0}), 500
     return jsonify({"history": history, "count": len(history)})
+
+
+@app.route("/db/digital_twin_history")
+def db_digital_twin_history_endpoint():
+    start = request.args.get("start")
+    end = request.args.get("end")
+    range_key = request.args.get("range")
+    limit = request.args.get("limit", default=5000, type=int)
+    try:
+        history = telemetry_db.get_digital_twin_history(
+            start=start, end=end, range_key=range_key, limit=limit
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to query digital twin history from database")
+        return jsonify({"error": str(exc), "history": [], "count": 0}), 500
+    return jsonify({"history": history, "count": len(history)})
+
+
+@app.route("/db/stats")
+def db_stats_endpoint():
+    try:
+        return jsonify(telemetry_db.get_database_stats())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read telemetry database stats")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/reports/data")
+def reports_data_endpoint():
+    """Report Generation data from SQLite (not browser sessionStorage).
+
+    Query params:
+      start, end  — Unix epoch seconds/ms or ISO-8601 UTC
+      range       — 1h | 6h | 24h | 7d | 30d
+      aggregate   — 1/true (default) to downsample for the UI; 0 for raw samples
+      limit       — max raw samples scanned before aggregation
+    """
+    start = request.args.get("start")
+    end = request.args.get("end")
+    range_key = request.args.get("range")
+    aggregate_raw = str(request.args.get("aggregate", "1")).lower()
+    aggregate = aggregate_raw not in ("0", "false", "no")
+    limit = request.args.get("limit", default=20000, type=int)
+    try:
+        data = telemetry_db.query_report_data(
+            start=start,
+            end=end,
+            range_key=range_key,
+            aggregate=aggregate,
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to build report data from telemetry database")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(data)
 
 
 # --------------------------------------------------------------------------
@@ -6207,36 +6214,48 @@ def demo_set(component, severity):
     return jsonify(get_state())
 
 
-
 # ===========================
-# I/O PROCESS CANDIDATES + ROUTES
+# IO CONTROLLER
 # ===========================
-# Integrated into RECOVERY_ACTIONS (io.pause/resume/terminate_process) and
-# GET /recovery/process_candidates?domain=io. Dedicated /recovery/io/* routes
-# remain as convenience wrappers; they never auto-execute.
+# Standalone, self-contained I/O controller for per-process disk I/O
+# monitoring and recovery, built independently of the existing CPU / GPU /
+# RAM / Disk / NIC controllers and the RECOVERY_ACTIONS registry above.
+#
+# Nothing in this section is wired into the main recovery workflow -- it
+# has its own routes so it can be exercised and tested completely on its
+# own. It reuses a few existing GENERIC safety/signal helpers purely by
+# CALLING them (validate_pid, validate_confirmation, _recovery_signal) --
+# none of those functions, or anything else above this marker, is modified.
+#
+# Not integrated into RECOVERY_ACTIONS / execute_recovery_action /
+# run_recovery_action / recovery history on purpose, per requirements.
 
-_IO_MIN_MB_PER_SEC = 0.05
-_IO_SAMPLE_INTERVAL_SECONDS = 1.0
+import psutil  # noqa: E402  -- imported here to keep this section self-contained
+
+_IO_MIN_MB_PER_SEC = 0.05          # candidates below this combined rate are noise, not real I/O
+_IO_SAMPLE_INTERVAL_SECONDS = 1.0  # ~1 second between the two io_counters() samples
 
 
-def _io_sample_all_process_counters() -> dict[int, tuple[int, int, Optional[str], Optional[str], Optional[str]]]:
-    """pid -> (read_bytes, write_bytes, name, username, cmdline)."""
-    snapshot: dict[int, tuple[int, int, Optional[str], Optional[str], Optional[str]]] = {}
-    for proc in psutil.process_iter(attrs=["pid", "name", "username", "cmdline"]):
+def _io_sample_all_process_counters() -> dict[int, tuple[int, int, Optional[str], Optional[str]]]:
+    """One pass over every running process: pid -> (read_bytes, write_bytes,
+    name, username). Processes that terminate mid-scan or deny access to
+    io_counters() (permissions, zombie, etc.) are simply skipped, per spec."""
+    snapshot: dict[int, tuple[int, int, Optional[str], Optional[str]]] = {}
+    for proc in psutil.process_iter(attrs=["pid", "name", "username"]):
         try:
             io = proc.io_counters()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
         except Exception:
+            # psutil can raise platform-specific errors (e.g. unsupported
+            # counters on some kernels) -- never let one bad process abort
+            # the whole scan.
             continue
-        cmdline_list = proc.info.get("cmdline") or []
-        cmdline = " ".join(cmdline_list) if cmdline_list else None
         snapshot[proc.pid] = (
             io.read_bytes,
             io.write_bytes,
             proc.info.get("name"),
             proc.info.get("username"),
-            cmdline,
         )
     return snapshot
 
@@ -6245,17 +6264,22 @@ def _io_sample_all_process_counters() -> dict[int, tuple[int, int, Optional[str]
 def get_io_process_candidates(
     min_mb_per_sec: float = _IO_MIN_MB_PER_SEC, limit: int = 50
 ) -> list[dict[str, Any]]:
-    """Live per-process I/O rates (MB/s) via two io_counters() samples ~1s apart."""
+    """Sample every process's io_counters() twice ~1 second apart and derive
+    live read/write/total MB/s per process, sorted highest total first.
+
+    Any process present in the first sample but gone (or access-denied) by
+    the second sample is dropped rather than reported with a stale rate.
+    """
     first = _io_sample_all_process_counters()
     time.sleep(_IO_SAMPLE_INTERVAL_SECONDS)
     second = _io_sample_all_process_counters()
 
     candidates: list[dict[str, Any]] = []
-    for pid, (rb2, wb2, name, username, cmdline) in second.items():
+    for pid, (rb2, wb2, name, username) in second.items():
         prev = first.get(pid)
         if prev is None:
             continue
-        rb1, wb1, _, _, _ = prev
+        rb1, wb1, _, _ = prev
 
         d_read = max(rb2 - rb1, 0)
         d_write = max(wb2 - wb1, 0)
@@ -6267,36 +6291,61 @@ def get_io_process_candidates(
         if total_mb_per_sec < min_mb_per_sec:
             continue
 
-        recoverable, reason, _ = validate_pid(pid)
-
-        # Best-effort CPU/memory enrichment for Recovery Console columns.
-        cpu_percent = None
-        memory_percent = None
-        try:
-            p = psutil.Process(pid)
-            cpu_percent = round(p.cpu_percent(interval=0.0), 1)
-            memory_percent = round(p.memory_percent(), 2)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
+        recoverable, _reason, _ = validate_pid(pid)
 
         candidates.append({
             "pid": pid,
             "process": name,
-            "command": cmdline or name,
             "user": username,
             "read_MB_per_sec": read_mb_per_sec,
             "write_MB_per_sec": write_mb_per_sec,
             "total_MB_per_sec": total_mb_per_sec,
-            "cpu_percent": cpu_percent,
-            "memory_percent": memory_percent,
             "recoverable": recoverable,
-            "reason": None if recoverable else reason,
         })
 
     candidates.sort(key=lambda c: c.get("total_MB_per_sec") or 0.0, reverse=True)
     return candidates[:limit]
 
 
+# ---- IO recovery handlers ---------------------------------------------------
+# Deliberately NOT added to RECOVERY_ACTIONS -- these are only reachable via
+# the standalone /recovery/io/* routes below, per the "do not integrate yet"
+# requirement. Each one reuses _recovery_signal() (defined above, untouched)
+# for the actual kill(1)-based signal + /proc verification.
+
+def _io_pause_process(pid: int) -> dict[str, Any]:
+    res= _recovery_signal(pid, signal.SIGSTOP, verify_stopped=True)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Process {pid} paused (SIGSTOP) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "pause failed")
+    )
+    return res
+
+
+def _io_resume_process(pid: int) -> dict[str, Any]:
+    res = _recovery_signal(pid, signal.SIGCONT, verify_stopped=False)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Process {pid} resumed (SIGCONT) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "resume failed")
+    )
+    return res
+
+
+def _io_terminate_process(pid: int) -> dict[str, Any]:
+    res = _recovery_signal(pid, signal.SIGTERM, verify_gone=True)
+    res["success"] = res["success"] and res["verified"]
+    res["message"] = (
+        f"Process {pid} terminated (SIGTERM) -- {res['verification']}."
+        if res["success"] else (res.get("verification") or res.get("stderr") or "terminate failed")
+    )
+    return res
+
+
+# Confirmation levels mirror the existing pause=2 / resume=1 / terminate=3
+# convention used by RECOVERY_ACTIONS above (see "Confirmation levels" note
+# near that registry), reusing validate_confirmation() as-is.
 _IO_ACTION_LEVELS = {"pause": 2, "resume": 1, "terminate": 3}
 _IO_ACTION_HANDLERS = {
     "pause": _io_pause_process,
@@ -6306,7 +6355,10 @@ _IO_ACTION_HANDLERS = {
 
 
 def _io_handle_recovery_request(action: str):
-    """Convenience wrapper for /recovery/io/<action> — same signals as /recovery/execute."""
+    """Shared body for the three /recovery/io/<action> POST routes below.
+    Expects JSON: {"pid": <pid>, "confirmation": {"userAcknowledged": true,
+    "level": <int>}}. Reuses validate_pid() and validate_confirmation() from
+    the existing Recovery Validation section as-is (calls only, no edits)."""
     body = request.get_json(silent=True) or {}
 
     ok, reason, pid = validate_pid(body.get("pid"))
@@ -6318,33 +6370,45 @@ def _io_handle_recovery_request(action: str):
     if not ok:
         return jsonify({"success": False, "message": reason}), 400
 
-    result = _IO_ACTION_HANDLERS[action]({"pid": pid})
+    result = _IO_ACTION_HANDLERS[action](pid)
     status = 200 if result.get("success") else 409
     return jsonify(result), status
 
 
+# ---- IO controller routes (all under /recovery/io/*, fully isolated) -------
+
 @app.route("/recovery/io/process_candidates")
 def io_process_candidates_endpoint():
-    """GET /recovery/io/process_candidates?min_mb_per_sec=0.05&limit=50"""
+    """
+        GET /recovery/io/process_candidates?min_mb_per_sec=0.05&limit=50
+
+    Returns every process whose combined read+write throughput over the
+    last ~1 second is at or above min_mb_per_sec, sorted by total_MB_per_sec
+    descending -- e.g. a `dd ... oflag=direct` run shows up here while it's
+    actively writing.
+    """
     min_mb = request.args.get("min_mb_per_sec", default=_IO_MIN_MB_PER_SEC, type=float)
     limit = request.args.get("limit", default=50, type=int)
     limit = max(1, min(limit, 200))
     candidates = get_io_process_candidates(min_mb_per_sec=min_mb, limit=limit)
-    return jsonify({"count": len(candidates), "candidates": candidates, "domain": "io"})
+    return jsonify({"count": len(candidates), "candidates": candidates})
 
 
 @app.route("/recovery/io/pause", methods=["POST"])
 def io_pause_endpoint():
+    """POST /recovery/io/pause  body: {"pid": <pid>, "confirmation": {"userAcknowledged": true, "level": 2}}"""
     return _io_handle_recovery_request("pause")
 
 
 @app.route("/recovery/io/resume", methods=["POST"])
 def io_resume_endpoint():
+    """POST /recovery/io/resume  body: {"pid": <pid>, "confirmation": {"userAcknowledged": true, "level": 1}}"""
     return _io_handle_recovery_request("resume")
 
 
 @app.route("/recovery/io/terminate", methods=["POST"])
 def io_terminate_endpoint():
+    """POST /recovery/io/terminate  body: {"pid": <pid>, "confirmation": {"userAcknowledged": true, "level": 3}}"""
     return _io_handle_recovery_request("terminate")
 
 
@@ -6373,6 +6437,7 @@ def main() -> None:
 
     try:
         telemetry_db.init_db()
+        logger.info("Telemetry history database: %s", telemetry_db.TELEMETRY_DB_PATH)
     except Exception:
         logger.exception("Telemetry database initialization failed; continuing without DB persistence")
 
@@ -6387,6 +6452,16 @@ def main() -> None:
         LATEST_METRICS = {}
         LATEST_LINK_HEALTH = {}
 
+    # Persist the first sample so telemetry_history.db is non-empty after startup,
+    # without waiting for the first updater_loop tick.
+    try:
+        if LATEST_METRICS:
+            telemetry_db.persist_poll_cycle(
+                LATEST_METRICS, LATEST_INVENTORY, LATEST_LINK_HEALTH
+            )
+    except Exception:
+        logger.exception("Failed to persist initial telemetry sample to database")
+
     thread = threading.Thread(target=updater_loop, daemon=True)
     thread.start()
 
@@ -6396,3 +6471,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
