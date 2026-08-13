@@ -82,20 +82,11 @@ export function generateRootCauseAnalysis(fault, evidence, metrics, linkHealth) 
     if (byLabel["Top CPU Process"]) causes.push(`Primary CPU consumer: ${byLabel["Top CPU Process"]}.`);
   }
 
-  if (id.includes("cpu-thermal")) {
+  if (id.includes("cpu-temperature") || id === "threshold-cpu-temperature") {
     if (cpu.usage_percent >= 80) causes.push(`Elevated CPU usage (${cpu.usage_percent}%) contributing to thermal load.`);
-    const cpuH = (linkHealth?.cpu || {})?.health || {};
-    const throttle =
-      (cpuH.thermal_throttling_total_core_count || 0) +
-      (cpuH.thermal_throttling_total_package_count || 0);
-    if (throttle > 0) causes.push(`CPU thermal throttling active (${throttle} event(s) from link_health).`);
     if (cpu.temperature_celsius != null) {
       causes.push(`CPU temperature at ${cpu.temperature_celsius}°C per live sensor.`);
     }
-  }
-
-  if (id.includes("cpu-thermal-throttle")) {
-    causes.push("CPU thermal throttling counters non-zero in link_health telemetry.");
   }
 
   if (id.includes("ram-usage") || id.includes("ram-swap")) {

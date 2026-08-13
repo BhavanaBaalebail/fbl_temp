@@ -617,12 +617,30 @@ def _parse_health_alert(alert: str, severity: str, seen_at: float) -> dict[str, 
     }
 
 
+def _is_cpu_thermal_throttling_non_fault(text: str) -> bool:
+    """CPU thermal throttling is telemetry only — never persist as a fault row."""
+    lower = str(text or "").lower()
+    if "cpu thermal throttling active" in lower:
+        return True
+    if "threshold-cpu-thermal-throttle" in lower:
+        return True
+    if "thermal throttling" in lower and "cpu" in lower and "gpu" not in lower and "nvidia" not in lower:
+        return True
+    if "throttl" in lower and "cpu" in lower and "gpu" not in lower and "nvidia" not in lower:
+        return True
+    return False
+
+
 def _extract_fault_rows(link_health: Optional[dict[str, Any]], seen_at: float) -> list[dict[str, Any]]:
     lh = (link_health or {}).get("health_summary") or {}
     rows: list[dict[str, Any]] = []
     for alert in lh.get("critical_alerts") or []:
+        if _is_cpu_thermal_throttling_non_fault(alert):
+            continue
         rows.append(_parse_health_alert(alert, "critical", seen_at))
     for alert in lh.get("warnings") or []:
+        if _is_cpu_thermal_throttling_non_fault(alert):
+            continue
         rows.append(_parse_health_alert(alert, "warning", seen_at))
     return rows
 

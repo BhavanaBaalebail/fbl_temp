@@ -37,8 +37,8 @@ const GPU_TEMP_THRESHOLDS = {
 };
 
 const GPU_UTIL_THRESHOLDS = {
-  warningMin: 90,
-  criticalMin: 97,
+  warningMin: 80,
+  criticalMin: 90,
 };
 
 /** CPU metric thresholds — industry-standard sustained utilization (80/90 rule) */
@@ -128,6 +128,22 @@ export function syncCpuThrottlePoll(linkHealth) {
 
 export function getCpuThrottlePollDelta() {
   return _pollThrottleDelta;
+}
+
+/** CPU thermal throttling is informational telemetry — never an FBL fault condition. */
+export function isCpuThermalThrottlingNonFaultText(text) {
+  const lower = String(text || "").toLowerCase();
+  if (/cpu thermal throttling active/i.test(lower)) return true;
+  if (/threshold-cpu-thermal-throttle/i.test(lower)) return true;
+  if (/thermal throttling detected/i.test(lower) && /\bcpu\b/i.test(lower)) return true;
+  if (
+    /throttl/i.test(lower) &&
+    /\bcpu\b/i.test(lower) &&
+    !/gpu|nvidia|junction/i.test(lower)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function ioBusyLevel(busyPct) {
@@ -236,6 +252,12 @@ function cpuUtilThresholdLabel(severity) {
     : `≥ ${CPU_UTIL_THRESHOLDS.warningMin}% (Warning)`;
 }
 
+function gpuUtilThresholdLabel(severity) {
+  return severity === "Critical"
+    ? `≥ ${GPU_UTIL_THRESHOLDS.criticalMin}% (Critical)`
+    : `≥ ${GPU_UTIL_THRESHOLDS.warningMin}% (Warning)`;
+}
+
 const CPU_TEMP_THRESHOLDS = {
   warningC: 75,
   criticalC: 85,
@@ -255,17 +277,12 @@ function gpuTemperatureLevel(tempC) {
 }
 
 /**
- * Util > 97% is Critical only when accompanied by elevated GPU temperature (≥ warning band).
- * Otherwise util > 97% stays Warning; 90–97% is Warning; below 90% is Healthy.
+ * Industry-standard sustained GPU utilization (80/90 rule — same as CPU).
  */
-function gpuUtilizationLevel(utilPct, tempC) {
+function gpuUtilizationLevel(utilPct) {
   if (utilPct == null || Number.isNaN(Number(utilPct))) return null;
   const u = Number(utilPct);
-  if (u > GPU_UTIL_THRESHOLDS.criticalMin) {
-    const tempLevel = gpuTemperatureLevel(tempC);
-    if (tempLevel === "critical" || tempLevel === "warning") return "critical";
-    return "warning";
-  }
+  if (u >= GPU_UTIL_THRESHOLDS.criticalMin) return "critical";
   if (u >= GPU_UTIL_THRESHOLDS.warningMin) return "warning";
   return "healthy";
 }
@@ -312,7 +329,7 @@ function computeGpuHealthLevel(gpuM, linkHealthGpuLevel = null) {
   if (gpuM) {
     const metricLevels = [
       gpuTemperatureLevel(gpuM.temperature_celsius),
-      gpuUtilizationLevel(gpuM.gpu_utilization_percent, gpuM.temperature_celsius),
+      gpuUtilizationLevel(gpuM.gpu_utilization_percent),
       gpuMemoryUtilizationLevel(gpuM.memory_utilization_percent),
       gpuPowerDrawLevel(gpuM.power_draw_watts, gpuM.power_limit_watts),
       gpuLinkStatusLevel(gpuM.link_status),
@@ -761,9 +778,8 @@ function sectionStatus(key, lh) {
     }
     case "cpu": {
       const h = data.health || {};
-      const throttleDelta = getCpuThrottlePollDelta();
       if ((h.fatal_errors || 0) > 0) return "critical";
-      if ((h.corrected_errors || 0) > 0 || throttleDelta > 0) return "warning";
+      if ((h.corrected_errors || 0) > 0) return "warning";
       return "healthy";
     }
     case "memory": {
@@ -883,7 +899,6 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
   // CPU
   const cpuLh = lh.cpu || {};
   const cpuH = cpuLh.health || {};
-  const cpuThrottleDelta = getCpuThrottlePollDelta();
   let cpuLevel = sectionStatus("cpu", lh);
   const cpuUtil = num(cpuM.usage_percent);
   const cpuTemp = num(cpuM.temperature_celsius);
@@ -901,9 +916,6 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
   const cpuParts = [];
   if (cpuH.fatal_errors > 0) cpuParts.push(`${cpuH.fatal_errors} fatal error(s)`);
   if (cpuH.corrected_errors > 0) cpuParts.push(`${cpuH.corrected_errors} corrected error(s)`);
-  if (cpuThrottleDelta > 0) {
-    cpuParts.push(`${cpuThrottleDelta} new throttle event(s) this poll`);
-  }
   if (cpuUtil != null) {
     const utilHigh = cpuUtil >= CPU_UTIL_THRESHOLDS.warningMin ? "elevated" : "nominal";
     cpuParts.push(`${cpuUtil}% utilization (${utilHigh})`);
@@ -1317,10 +1329,7 @@ function syncLiveThresholdFields(fault, metrics, linkHealth, inventory) {
 
   if (id === "threshold-gpu-utilization" && gpu?.gpu_utilization_percent != null) {
     fields.currentValue = `${gpu.gpu_utilization_percent}%`;
-    fields.thresholdCrossed =
-      fault.severity === "Critical"
-        ? `> ${GPU_UTIL_THRESHOLDS.criticalMin}% with elevated temperature (Critical)`
-        : `≥ ${GPU_UTIL_THRESHOLDS.warningMin}% (Warning)`;
+    fields.thresholdCrossed = gpuUtilThresholdLabel(fault.severity);
   }
 
   if (id === "threshold-gpu-vram" && gpu?.memory_utilization_percent != null) {
@@ -1436,8 +1445,6 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
   const nicEval = evaluateNicHealth(lh, metrics);
   const faults = [];
 
-  const cpuThrottleDelta = getCpuThrottlePollDelta();
-
   if ((cpuH.fatal_errors || 0) > 0) {
     faults.push(
       thresholdFault({
@@ -1461,19 +1468,6 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
         currentValue: String(cpuH.corrected_errors),
         thresholdCrossed: "≥ 1 corrected MCE (Warning)",
         description: `${cpuH.corrected_errors} corrected machine-check error(s) on CPU.`,
-      })
-    );
-  }
-  if (cpuThrottleDelta > 0) {
-    faults.push(
-      thresholdFault({
-        id: "threshold-cpu-thermal-throttle",
-        severity: "Warning",
-        component: "CPU",
-        metricName: "Thermal Throttling",
-        currentValue: String(cpuThrottleDelta),
-        thresholdCrossed: "≥ 1 new throttle event since last poll (Warning)",
-        description: `CPU thermal throttling detected (${cpuThrottleDelta} new event(s) since last telemetry poll). Lifetime counter is not used for alerting.`,
       })
     );
   }
@@ -1656,11 +1650,7 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
       }
     }
     if (gpuM.gpu_utilization_percent != null) {
-      const gpuUtilLevel = gpuUtilizationLevel(
-        gpuM.gpu_utilization_percent,
-        gpuM.temperature_celsius
-      );
-      if (gpuUtilLevel === "critical") {
+      if (gpuM.gpu_utilization_percent >= GPU_UTIL_THRESHOLDS.criticalMin) {
         faults.push(
           thresholdFault({
             id: "threshold-gpu-utilization",
@@ -1668,11 +1658,11 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
             component: "GPU",
             metricName: "Utilization",
             currentValue: `${gpuM.gpu_utilization_percent}%`,
-            thresholdCrossed: `> ${GPU_UTIL_THRESHOLDS.criticalMin}% with elevated temperature (Critical)`,
-            description: `GPU utilization ${gpuM.gpu_utilization_percent}% is critically high with elevated GPU temperature.`,
+            thresholdCrossed: gpuUtilThresholdLabel("Critical"),
+            description: `GPU utilization ${gpuM.gpu_utilization_percent}% exceeds critical threshold.`,
           })
         );
-      } else if (gpuUtilLevel === "warning") {
+      } else if (gpuM.gpu_utilization_percent >= GPU_UTIL_THRESHOLDS.warningMin) {
         faults.push(
           thresholdFault({
             id: "threshold-gpu-utilization",
@@ -1680,10 +1670,7 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
             component: "GPU",
             metricName: "Utilization",
             currentValue: `${gpuM.gpu_utilization_percent}%`,
-            thresholdCrossed:
-              Number(gpuM.gpu_utilization_percent) > GPU_UTIL_THRESHOLDS.criticalMin
-                ? `> ${GPU_UTIL_THRESHOLDS.criticalMin}% (Warning — temperature nominal)`
-                : `≥ ${GPU_UTIL_THRESHOLDS.warningMin}% (Warning)`,
+            thresholdCrossed: gpuUtilThresholdLabel("Warning"),
             description: `GPU utilization ${gpuM.gpu_utilization_percent}% exceeds warning threshold.`,
           })
         );
@@ -2131,6 +2118,7 @@ export function buildFaultLog(linkHealth, inventory, metrics) {
 
   (summary.critical_alerts || []).forEach((msg) => {
     if (isRemovedComponentEvent(msg)) return;
+    if (isCpuThermalThrottlingNonFaultText(msg)) return;
     const component = inferComponent(msg);
     if (!component) return;
     faults.push({
@@ -2149,6 +2137,7 @@ export function buildFaultLog(linkHealth, inventory, metrics) {
 
   (summary.warnings || []).forEach((msg) => {
     if (isRemovedComponentEvent(msg)) return;
+    if (isCpuThermalThrottlingNonFaultText(msg)) return;
     const component = inferComponent(msg);
     if (!component) return;
     faults.push({
@@ -2178,6 +2167,9 @@ export function buildFaultLog(linkHealth, inventory, metrics) {
     .slice(0, 100)
     .forEach((ev) => {
       if (isRemovedComponentEvent(ev.message, ev.category, ev.device)) return;
+      if (isCpuThermalThrottlingNonFaultText(`${ev.message || ""} ${ev.category || ""} ${ev.device || ""}`)) {
+        return;
+      }
       const severity =
         ev.severity === "critical"
           ? "Critical"
@@ -2269,8 +2261,8 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
       overallStatus: overallAnomalyStatus(assessments.CPU?.level),
       rows: [
         anomalyRow(
-          "Thermal throttle",
-          getCpuThrottlePollDelta() > 0 ? "warning" : "healthy",
+          "Thermal throttle (info)",
+          "healthy",
           getCpuThrottlePollDelta() > 0
             ? `${getCpuThrottlePollDelta()} new event(s) this poll`
             : "No recent throttling"
@@ -2322,7 +2314,7 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
         ),
         anomalyRow(
           "GPU utilization",
-          gpuUtilizationLevel(gpuM?.gpu_utilization_percent, gpuM?.temperature_celsius) ||
+          gpuUtilizationLevel(gpuM?.gpu_utilization_percent) ||
             (gpuM ? "healthy" : "unknown"),
           gpuM?.gpu_utilization_percent != null
             ? `${gpuM.gpu_utilization_percent}%`

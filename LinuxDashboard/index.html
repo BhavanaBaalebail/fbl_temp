@@ -1040,9 +1040,8 @@ function sectionStatus(key, lh) {
     }
     case "cpu": {
       const h = data.health || {};
-      const throttle = (h.thermal_throttling_total_core_count || 0) + (h.thermal_throttling_total_package_count || 0);
       if ((h.fatal_errors || 0) > 0) return "Critical";
-      if ((h.corrected_errors || 0) > 0 || throttle > 0) return "Warning";
+      if ((h.corrected_errors || 0) > 0) return "Warning";
       return "Healthy";
     }
     case "memory": {
@@ -1153,6 +1152,17 @@ function renderAll() {
 // Data fetching
 // --------------------------------------------------
 
+function isCpuThermalThrottlingNonFaultText(text) {
+  const lower = String(text || "").toLowerCase();
+  if (/cpu thermal throttling active/i.test(lower)) return true;
+  if (/threshold-cpu-thermal-throttle/i.test(lower)) return true;
+  if (/thermal throttling detected/i.test(lower) && /\bcpu\b/i.test(lower)) return true;
+  if (/throttl/i.test(lower) && /\bcpu\b/i.test(lower) && !/gpu|nvidia|junction/i.test(lower)) {
+    return true;
+  }
+  return false;
+}
+
 function isRemovedTelemetryText(text) {
   const lower = String(text || "").toLowerCase();
   return (
@@ -1161,7 +1171,8 @@ function isRemovedTelemetryText(text) {
     lower.includes("power supply") ||
     lower.includes("bmc") ||
     lower.includes("ipmi") ||
-    lower.includes("management")
+    lower.includes("management") ||
+    isCpuThermalThrottlingNonFaultText(text)
   );
 }
 

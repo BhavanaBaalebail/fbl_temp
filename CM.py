@@ -216,9 +216,6 @@ _state_lock = threading.Lock()
 LATEST_INVENTORY: dict[str, Any] = {}
 LATEST_METRICS: dict[str, Any] = {}
 LATEST_LINK_HEALTH: dict[str, Any] = {}
-# Lifetime CPU throttle sysfs counters — track delta between polls only.
-_LAST_CPU_THROTTLE_TOTAL: Optional[int] = None
-
 # Per-collection-cycle command cache so repeated identical subprocess calls
 # within a single collect_* pass (e.g. multiple callers needing `lscpu` or
 # `lspci -vv`) are only shelled out once. Cleared at the start of every
@@ -4596,24 +4593,6 @@ def compute_health_summary(report: dict[str, Any]) -> dict[str, Any]:
     if (cpu_health.get("corrected_errors") or 0) > 0:
         components_with_warnings += 1
         flag("cpu", True, "warning", "CPU corrected hardware errors detected")
-
-    global _LAST_CPU_THROTTLE_TOTAL
-    total_throttle = (
-        (cpu_health.get("thermal_throttling_total_core_count") or 0)
-        + (cpu_health.get("thermal_throttling_total_package_count") or 0)
-    )
-    throttle_delta = 0
-    if _LAST_CPU_THROTTLE_TOTAL is not None:
-        throttle_delta = max(0, total_throttle - _LAST_CPU_THROTTLE_TOTAL)
-    _LAST_CPU_THROTTLE_TOTAL = total_throttle
-    if throttle_delta > 0:
-        components_with_warnings += 1
-        flag(
-            "cpu",
-            True,
-            "warning",
-            f"CPU thermal throttling active ({throttle_delta} new event(s) since last poll)",
-        )
 
     # --- NIC ---
     for nic in report.get("nic", []) or []:

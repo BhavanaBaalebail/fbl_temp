@@ -18,7 +18,7 @@ export const RECOMMENDATION_CATALOG = [
   {
     id: "cpu-thermal",
     label: "CPU Thermal Recovery",
-    match: (f) => f.id === "threshold-cpu-temperature" || f.id === "threshold-cpu-thermal-throttle",
+    match: (f) => f.id === "threshold-cpu-temperature",
     actionIds: [
       "cpu.renice",
       "cpu.pause_process",

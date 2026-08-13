@@ -242,10 +242,6 @@ export function collectEvidence(fault, inventory, metrics, linkHealth) {
     if (cpu.load_average?.["1min"] != null) {
       items.push({ label: "Load Average (1m)", value: String(cpu.load_average["1min"]) });
     }
-    const throttle =
-      (cpuH.thermal_throttling_total_core_count || 0) +
-      (cpuH.thermal_throttling_total_package_count || 0);
-    if (throttle > 0) items.push({ label: "Thermal Throttle Events", value: String(throttle) });
     if (cpuH.fatal_errors > 0) items.push({ label: "Fatal Errors", value: String(cpuH.fatal_errors) });
     if (cpuH.corrected_errors > 0) {
       items.push({ label: "Corrected Errors", value: String(cpuH.corrected_errors) });

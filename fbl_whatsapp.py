@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("fbl_whatsapp")
@@ -38,6 +39,57 @@ except Exception:  # pragma: no cover
     telemetry_db = None  # type: ignore
 
 _lock = threading.Lock()
+_WHATSAPP_ENV_LOADED = False
+
+
+def load_whatsapp_env_file(path: Optional[str] = None) -> bool:
+    """
+    Load WHATSAPP_* vars from a local file for demo/dev (never commit secrets).
+    Default: whatsapp.env beside this module / CM.py project root.
+    Existing process env vars are not overwritten.
+    """
+    global _WHATSAPP_ENV_LOADED
+    if _WHATSAPP_ENV_LOADED:
+        return False
+
+    candidates = []
+    if path:
+        candidates.append(Path(path))
+    else:
+        here = Path(__file__).resolve().parent
+        candidates.extend([here / "whatsapp.env", here / ".env.whatsapp"])
+
+    env_path = next((p for p in candidates if p.is_file()), None)
+    if env_path is None:
+        _WHATSAPP_ENV_LOADED = True
+        return False
+
+    loaded = 0
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if not key.startswith("WHATSAPP_"):
+            continue
+        if key in os.environ and os.environ.get(key):
+            continue
+        os.environ[key] = value
+        loaded += 1
+
+    _WHATSAPP_ENV_LOADED = True
+    if loaded:
+        logger.info("Loaded WhatsApp demo config from %s (%s vars)", env_path.name, loaded)
+    return loaded > 0
+
+
+load_whatsapp_env_file()
 
 
 # ---------------------------------------------------------------------------

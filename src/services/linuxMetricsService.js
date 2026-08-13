@@ -12,6 +12,7 @@ import {
   getLinkHealthSummary,
   getPrimaryGpu,
   syncCpuThrottlePoll,
+  isCpuThermalThrottlingNonFaultText,
 } from "./linkHealthService";
 import { enrichMetricsGpu } from "./gpuMetricsSupplement";
 
@@ -37,7 +38,8 @@ function isRemovedTelemetryText(text) {
     lower.includes("power supply") ||
     lower.includes("bmc") ||
     lower.includes("ipmi") ||
-    lower.includes("management")
+    lower.includes("management") ||
+    isCpuThermalThrottlingNonFaultText(text)
   );
 }
 
