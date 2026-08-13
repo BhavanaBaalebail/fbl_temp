@@ -1,26 +1,15 @@
 /**
- * Report Data Builder — format-agnostic report model from SQLite history.
+ * Report Data Builder — builds format-agnostic report data from SQLite history.
  * Source of truth: CM.py GET /reports/data → telemetry_history.db
- * Never uses sessionStorage for historical telemetry.
+ * Does NOT use sessionStorage for historical telemetry.
  */
 
 import { REPORT_INTERVALS, fetchHistoricalReportData } from "./historicalReportApi";
 import { filterSelectedSections } from "./reportSections";
 import {
-  fmtNum,
-  fmtPct,
-  fmtInt,
-  fmtDuration,
-  fmtLocal,
-  fmtIsoLocal,
-  statusTitle,
-  computeStats,
-} from "./reportFormat";
-import { REPORT_THRESHOLDS, thresholdPair } from "./reportThresholds";
-
-/* -------------------------------------------------------------------------- */
-/* Utilities                                                                  */
-/* -------------------------------------------------------------------------- */
+  buildPredictiveMaintenance,
+  PREDICTIVE_DISCLAIMER,
+} from "../predictiveMaintenance";
 
 function num(value) {
   if (value == null || value === "") return null;
@@ -28,8 +17,31 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function computeStats(values) {
+  const nums = values.map(num).filter((v) => v != null);
+  if (!nums.length) {
+    return { count: 0, avg: null, min: null, max: null, current: null, trend: "—" };
+  }
+  const sum = nums.reduce((a, b) => a + b, 0);
+  const avg = Math.round((sum / nums.length) * 100) / 100;
+  const min = Math.round(Math.min(...nums) * 100) / 100;
+  const max = Math.round(Math.max(...nums) * 100) / 100;
+  const current = Math.round(nums[nums.length - 1] * 100) / 100;
+  let trend = "stable";
+  if (nums.length >= 4) {
+    const mid = Math.floor(nums.length / 2);
+    const first = nums.slice(0, mid);
+    const second = nums.slice(mid);
+    const a1 = first.reduce((a, b) => a + b, 0) / first.length;
+    const a2 = second.reduce((a, b) => a + b, 0) / second.length;
+    if (a2 > a1 * 1.08) trend = "rising";
+    else if (a2 < a1 * 0.92) trend = "falling";
+  }
+  return { count: nums.length, avg, min, max, current, trend };
+}
+
 function parseJsonField(value, fallback = null) {
-  if (value == null || value === "") return fallback;
+  if (value == null) return fallback;
   if (typeof value === "object") return value;
   try {
     return JSON.parse(value);
@@ -38,141 +50,27 @@ function parseJsonField(value, fallback = null) {
   }
 }
 
-function severityRank(level) {
-  const l = String(level || "").toLowerCase();
-  if (l === "critical") return 3;
-  if (l === "warning") return 2;
-  if (l === "healthy") return 1;
-  return 0;
+function formatDurationSeconds(seconds) {
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  const s = Math.max(0, Math.round(seconds));
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  if (mins > 0) return `${mins}m`;
+  return `${s}s`;
 }
 
-function worstStatus(...levels) {
-  return levels.reduce(
-    (worst, cur) => (severityRank(cur) > severityRank(worst) ? cur : worst),
-    "nodata"
-  );
+function formatLocal(tsSecOrMs) {
+  if (tsSecOrMs == null) return "—";
+  const ms = Number(tsSecOrMs) > 1e12 ? Number(tsSecOrMs) : Number(tsSecOrMs) * 1000;
+  if (!Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleString();
 }
-
-function levelFromValue(value, pair) {
-  if (value == null || !pair) return "nodata";
-  const { warning, critical } = pair;
-  if (critical != null && value >= critical) return "critical";
-  if (warning != null && value >= warning) return "warning";
-  return "healthy";
-}
-
-function thresholdLabel(pair, unit = "") {
-  if (!pair) return "-";
-  const parts = [];
-  if (pair.warning != null) parts.push(`warn >=${pair.warning}${unit}`);
-  if (pair.critical != null) parts.push(`crit >=${pair.critical}${unit}`);
-  return parts.length ? parts.join(" | ") : "-";
-}
-
-function matchComponent(name, target) {
-  const n = String(name || "")
-    .toLowerCase()
-    .replace(/\s+/g, "");
-  const t = String(target || "")
-    .toLowerCase()
-    .replace(/\s+/g, "");
-  if (!n || !t) return false;
-  if (t === "io") return n === "io" || n.includes("io") || n.includes("disk");
-  if (t === "disk") return n.includes("disk") || n.includes("storage") || n === "io";
-  if (t === "ram") return n.includes("ram") || n.includes("mem");
-  return n.includes(t) || t.includes(n);
-}
-
-function extractProcessHint(message) {
-  if (!message) return null;
-  const text = String(message);
-  const m =
-    text.match(/process\s+[\"']?([^\s\"',:;]+)[\"']?/i) ||
-    text.match(/\bpid\s*[:=]?\s*(\d+)\b/i) ||
-    text.match(/\b(\d{3,})\b/);
-  if (!m) return null;
-  if (/^\d+$/.test(m[1])) return `process ${m[1]}`;
-  return m[1];
-}
-
-function findPeakSample(samples, key) {
-  let peak = null;
-  let peakSample = null;
-  for (const s of samples || []) {
-    const v = num(s?.[key]);
-    if (v == null) continue;
-    if (peak == null || v > peak) {
-      peak = v;
-      peakSample = s;
-    }
-  }
-  return { peak, peakSample, peakAt: peakSample ? fmtLocal(peakSample.collected_at ?? peakSample.t) : null };
-}
-
-function chartYBounds(points, pair) {
-  const vals = (points || []).map((p) => p.v).filter((v) => v != null && Number.isFinite(v));
-  if (!vals.length) return { yMin: 0, yMax: 1 };
-  let yMin = Math.min(...vals, 0);
-  let yMax = Math.max(...vals);
-  if (pair?.critical != null) yMax = Math.max(yMax, pair.critical);
-  if (pair?.warning != null) yMax = Math.max(yMax, pair.warning);
-  if (yMax === yMin) yMax = yMin + 1;
-  const pad = (yMax - yMin) * 0.08;
-  return { yMin: Math.max(0, yMin - pad * 0.25), yMax: yMax + pad };
-}
-
-function makeChart(samples, { key, title, unit, yLabel, thresholds }) {
-  const points = (samples || [])
-    .filter((s) => s?.t != null && s[key] != null)
-    .map((s) => ({ t: s.t, v: Number(s[key]) }));
-  if (points.length < 2) return null;
-  const pair = thresholdPair(thresholds);
-  const { yMin, yMax } = chartYBounds(points, pair);
-  return {
-    key,
-    title,
-    unit: unit || "",
-    yLabel: yLabel || title,
-    points,
-    warning: pair?.warning ?? null,
-    critical: pair?.critical ?? null,
-    yMin,
-    yMax,
-  };
-}
-
-function detectGaps(samples, bucketSeconds) {
-  const gaps = [];
-  if (!samples?.length || samples.length < 2) return gaps;
-  const threshold = Math.max((bucketSeconds || 60) * 3, 5 * 60);
-  for (let i = 1; i < samples.length; i += 1) {
-    const prev = samples[i - 1].collected_at;
-    const cur = samples[i].collected_at;
-    if (prev == null || cur == null) continue;
-    const delta = cur - prev;
-    if (delta > threshold) {
-      gaps.push({
-        start: prev,
-        end: cur,
-        startIso: new Date(prev * 1000).toISOString(),
-        endIso: new Date(cur * 1000).toISOString(),
-        label: `Telemetry gap: ${fmtLocal(prev)} – ${fmtLocal(cur)}`,
-        durationSeconds: delta,
-        durationLabel: fmtDuration(delta),
-      });
-    }
-  }
-  return gaps;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Row mappers                                                                */
-/* -------------------------------------------------------------------------- */
 
 function mapTelemetrySample(row) {
-  if (!row || typeof row !== "object") return null;
-  const mountsRaw = parseJsonField(row.disk_mounts_json, []) || [];
-  const mounts = Array.isArray(mountsRaw) ? mountsRaw : [];
+  const mounts = parseJsonField(row.disk_mounts_json, []) || [];
   const collectedAt = num(row.collected_at);
   return {
     t: collectedAt != null ? collectedAt * 1000 : null,
@@ -182,29 +80,36 @@ function mapTelemetrySample(row) {
     cpu_usage: num(row.cpu_usage_percent),
     cpu_temp: num(row.cpu_temperature_celsius),
     cpu_load_1: num(row.cpu_load_1min),
+    cpu_load_5: num(row.cpu_load_5min),
+    cpu_load_15: num(row.cpu_load_15min),
     cpu_user: num(row.cpu_user_percent),
     cpu_system: num(row.cpu_system_percent),
     mem_usage: num(row.memory_usage_percent),
     mem_swap: num(row.memory_swap_usage_percent),
-    mem_available_gb: num(row.memory_available_gb),
     mem_used_gb: num(row.memory_used_gb),
     mem_total_gb: num(row.memory_total_gb),
+    mem_available_gb: num(row.memory_available_gb),
     gpu_temp: num(row.gpu_temperature_celsius),
     gpu_util: num(row.gpu_utilization_percent),
     gpu_vram: num(row.gpu_memory_utilization_percent),
     gpu_power: num(row.gpu_power_draw_watts),
     gpu_model: row.gpu_model || null,
+    nic_up: num(row.nic_up_count),
+    nic_total: num(row.nic_total_count),
+    nic_errors: num(row.nic_error_count),
     nic_util: num(row.nic_utilization_percent),
     nic_rx: num(row.nic_rx_mbps),
     nic_tx: num(row.nic_tx_mbps),
-    nic_errors: num(row.nic_error_count),
-    nic_up: num(row.nic_up_count),
+    io_device: row.io_device || null,
     io_busy: num(row.io_busy_percent),
-    io_total_mbps: num(row.io_total_mb_per_sec),
+    io_read_iops: num(row.io_read_iops),
+    io_write_iops: num(row.io_write_iops),
     io_iops: num(row.io_total_iops),
+    io_read_mbps: num(row.io_read_mb_per_sec),
+    io_write_mbps: num(row.io_write_mb_per_sec),
+    io_total_mbps: num(row.io_total_mb_per_sec),
     io_queue: num(row.io_queue_depth),
     io_latency: num(row.io_avg_latency_ms),
-    io_device: row.io_device || null,
     disk_mounts: mounts.map((m) => ({
       mp: m.mp || m.mountpoint || m.mount || "—",
       pct: num(m.pct ?? m.usage_percent),
@@ -214,20 +119,21 @@ function mapTelemetrySample(row) {
     })),
     lh_score: num(row.lh_score),
     lh_health: row.lh_overall_health || null,
+    pci_count: num(row.pci_count),
+    usb_count: num(row.usb_count),
+    uptime_seconds: num(row.uptime_seconds),
   };
 }
 
 function mapFault(row) {
-  if (!row || typeof row !== "object") return null;
   const first = num(row.first_seen_at) ?? num(row.timestamp);
   const last = num(row.last_seen_at) ?? first;
   const payload = parseJsonField(row.payload, {}) || {};
   const durationSec =
     first != null && last != null && last >= first ? last - first : null;
-  const status = row.status || "Active";
   const corrected =
-    String(status).toLowerCase().includes("clear") ||
-    String(status).toLowerCase().includes("resolved");
+    String(row.status || "").toLowerCase().includes("clear") ||
+    String(row.status || "").toLowerCase().includes("resolved");
 
   return {
     id: row.fault_id || row.id,
@@ -238,93 +144,45 @@ function mapFault(row) {
     severity: row.severity || "Warning",
     component: row.component || "unknown",
     metricName: row.metric_name || payload.metric_name || null,
-    currentValue: row.current_value ?? payload.current_value ?? null,
+    currentValue: row.current_value || payload.current_value || null,
     thresholdCrossed: row.threshold_crossed || payload.threshold || null,
     description: row.message || row.description || "",
     message: row.message || row.description || "",
-    status,
+    status: row.status || "Active",
     source: row.source || "health_summary",
     durationSeconds: durationSec,
-    durationLabel: fmtDuration(durationSec),
-    faultDetected: fmtLocal(first),
-    faultCorrected: corrected ? fmtLocal(last) : "Correction time unavailable.",
-    peakValue: row.current_value ?? payload.peak ?? null,
+    durationLabel: formatDurationSeconds(durationSec),
+    faultDetected: formatLocal(first),
+    faultCorrected: corrected ? formatLocal(last) : "Correction time unavailable.",
+    peakValue: row.current_value || payload.peak || null,
     reasonForSpike: null,
-    remarks: payload.raw || row.description || row.message || "",
+    remarks: payload.raw || row.description || "",
   };
 }
 
 function mapRecovery(row) {
-  if (!row || typeof row !== "object") return null;
   const entry = parseJsonField(row.entry_json, {}) || {};
   const params = parseJsonField(row.params_json, entry.params || {}) || {};
   const collected = num(row.collected_at);
-  const message = row.message || entry.message || "";
-  const process =
-    row.process ||
-    params.process ||
-    params.name ||
-    entry.process ||
-    extractProcessHint(message) ||
-    null;
-  const pid = row.pid ?? params.pid ?? entry.params?.pid ?? null;
-  const success =
-    row.success === 1 ||
-    row.success === true ||
-    entry.success === true;
-  const failed = row.success === 0 || row.success === false || entry.success === false;
-  const action = row.action || entry.action || "—";
-  let component = row.component || entry.component || entry.fault?.component || null;
-  if (!component || component === "—") {
-    const act = String(action).toLowerCase();
-    if (act.startsWith("gpu.")) component = "GPU";
-    else if (act.startsWith("cpu.")) component = "CPU";
-    else if (act.startsWith("ram.") || act.startsWith("memory.")) component = "RAM";
-    else if (act.startsWith("disk.")) component = "DISK";
-    else if (act.startsWith("nic.")) component = "NIC";
-    else if (act.startsWith("io.")) component = "IO";
-    else component = "—";
-  }
-
-  const tMs =
-    collected != null
-      ? collected * 1000
-      : row.timestamp
-        ? new Date(row.timestamp).getTime()
-        : null;
-
   return {
-    time: fmtLocal(collected) !== "—" ? fmtLocal(collected) : fmtIsoLocal(row.timestamp),
     timestamp: row.timestamp || (collected != null ? new Date(collected * 1000).toISOString() : null),
-    t: Number.isFinite(tMs) ? tMs : null,
     collected_at: collected,
-    component,
-    action,
-    pid: pid != null ? String(pid) : "—",
-    process: process || "—",
-    result:
-      row.result ||
-      (success ? "success" : failed ? "failed" : entry.result) ||
-      "—",
-    verification:
-      entry.verification ||
-      (String(message).toLowerCase().includes("confirmed")
-        ? "Verified"
-        : entry.after_metrics
-          ? "Recorded"
-          : "—"),
-    status: success ? "Completed" : failed ? "Failed" : "Recorded",
-    remarks: message || "—",
-    success,
-    message,
-    trigger: entry.fault?.description || entry.confirmation ? "Operator-initiated" : "Recorded recovery",
-    faultHint: entry.fault || null,
+    component: row.component || entry.component || entry.fault?.component || null,
+    action: row.action || entry.action || null,
+    pid: row.pid ?? params.pid ?? entry.params?.pid ?? null,
+    process: row.process || params.process || params.name || entry.process || null,
+    result: row.result || (row.success ? "success" : row.success === 0 ? "failed" : entry.result) || null,
+    success: row.success === 1 || row.success === true || entry.success === true,
+    message: row.message || entry.message || "",
+    verification: entry.verification || entry.after_metrics ? "Recorded" : "—",
+    status: row.success === 1 || entry.success ? "Completed" : row.success === 0 ? "Failed" : "Recorded",
+    remarks: row.message || entry.message || "",
     duration_seconds: num(row.duration_seconds ?? entry.duration_seconds),
+    raw: row,
   };
 }
 
 function mapDigitalTwin(row) {
-  if (!row || typeof row !== "object") return null;
   return {
     id: row.id,
     timestamp: row.timestamp,
@@ -347,135 +205,129 @@ function mapDigitalTwin(row) {
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Coverage / executive                                                       */
-/* -------------------------------------------------------------------------- */
+function detectGaps(samples, bucketSeconds) {
+  const gaps = [];
+  if (!samples?.length || samples.length < 2) return gaps;
+  const threshold = Math.max((bucketSeconds || 60) * 3, 5 * 60);
+  for (let i = 1; i < samples.length; i += 1) {
+    const prev = samples[i - 1].collected_at;
+    const cur = samples[i].collected_at;
+    if (prev == null || cur == null) continue;
+    const delta = cur - prev;
+    if (delta > threshold) {
+      gaps.push({
+        start: prev,
+        end: cur,
+        startIso: new Date(prev * 1000).toISOString(),
+        endIso: new Date(cur * 1000).toISOString(),
+        label: `Telemetry gap: ${formatLocal(prev)} – ${formatLocal(cur)}`,
+        durationSeconds: delta,
+      });
+    }
+  }
+  return gaps;
+}
 
-function buildCoverageSection(api, samples, intervalKey, customRange) {
-  const cov = api?.dataCoverage || {};
+function buildCoverageSection(api, intervalKey, customRange) {
+  const cov = api.dataCoverage || {};
   const interval = REPORT_INTERVALS[intervalKey];
   const requestedLabel =
     intervalKey === "custom" && customRange?.start && customRange?.end
-      ? `${fmtLocal(customRange.start)} – ${fmtLocal(customRange.end)}`
+      ? `${formatLocal(customRange.start / 1000)} – ${formatLocal(customRange.end / 1000)}`
       : interval?.label || intervalKey;
 
   const reqSec = num(cov.requestedSeconds);
   const availSec = num(cov.availableSeconds);
   const missingSec = num(cov.missingSeconds);
-  const rawSampleCount = num(api?.telemetry_raw_count) ?? num(cov.telemetrySampleCount) ?? 0;
-  const reportPointCount = samples?.length ?? 0;
 
-  let status = cov.status || (reportPointCount ? "PARTIAL" : "EMPTY");
-  if (!reportPointCount && !rawSampleCount) status = "EMPTY";
-
-  let notice = cov.notice || "";
-  if (status === "PARTIAL" && reqSec && availSec != null) {
+  let narrative = cov.notice || "";
+  if (cov.status === "PARTIAL" && reqSec && availSec != null) {
     const reqDays = reqSec / 86400;
     const availDays = availSec / 86400;
     const missingDays = Math.max(0, reqDays - availDays);
     if (reqDays >= 1) {
-      notice =
+      narrative =
         `Requested reporting period: ${reqDays.toFixed(1)} days. ` +
         `Available historical telemetry: ${availDays.toFixed(1)} days. ` +
-        `Telemetry was not available for the earlier ${missingDays.toFixed(1)} days. ` +
-        `Report uses ${reportPointCount} aggregated point(s) derived from ${rawSampleCount} raw SQLite sample(s).`;
+        `Telemetry was not available for the earlier ${missingDays.toFixed(1)} days.`;
     }
   }
-  if (status === "EMPTY") {
-    notice =
-      "No historical telemetry is available in the database for the requested reporting period. " +
-      "Raw sample count and report point count are both zero; live metrics were not substituted.";
-  } else if (status === "COMPLETE" && !notice) {
-    notice =
-      `Historical telemetry fully covers the requested reporting period. ` +
-      `Report uses ${reportPointCount} aggregated point(s) from ${rawSampleCount} raw SQLite sample(s).`;
-  } else if (status === "COMPLETE" && notice && !notice.includes("raw")) {
-    notice =
-      `${notice} Report uses ${reportPointCount} aggregated point(s) from ${rawSampleCount} raw SQLite sample(s).`;
+  if (cov.status === "EMPTY") {
+    narrative =
+      "No historical telemetry is available in the database for the requested reporting period.";
   }
 
   return {
-    status,
-    notice,
+    status: cov.status || (api.telemetry_count ? "PARTIAL" : "EMPTY"),
+    notice: narrative,
     requestedLabel,
-    requestedStart: cov.requestedStart ?? null,
-    requestedEnd: cov.requestedEnd ?? null,
-    requestedStartIso: cov.requestedStartIso ?? null,
-    requestedEndIso: cov.requestedEndIso ?? null,
-    availableStart: cov.availableStart ?? null,
-    availableEnd: cov.availableEnd ?? null,
-    availableStartIso: cov.availableStartIso ?? null,
-    availableEndIso: cov.availableEndIso ?? null,
-    databaseStart: cov.databaseStart ?? null,
-    databaseEnd: cov.databaseEnd ?? null,
-    databaseStartIso: cov.databaseStartIso ?? null,
-    databaseEndIso: cov.databaseEndIso ?? null,
+    requestedStart: cov.requestedStart,
+    requestedEnd: cov.requestedEnd,
+    requestedStartIso: cov.requestedStartIso,
+    requestedEndIso: cov.requestedEndIso,
+    availableStart: cov.availableStart,
+    availableEnd: cov.availableEnd,
+    availableStartIso: cov.availableStartIso,
+    availableEndIso: cov.availableEndIso,
+    databaseStart: cov.databaseStart,
+    databaseEnd: cov.databaseEnd,
+    databaseStartIso: cov.databaseStartIso,
+    databaseEndIso: cov.databaseEndIso,
     requestedSeconds: reqSec,
     availableSeconds: availSec,
     missingSeconds: missingSec,
-    coveragePercent: cov.coveragePercent ?? null,
-    coverageDurationLabel: fmtDuration(availSec),
-    requestedDurationLabel: fmtDuration(reqSec),
-    rawSampleCount,
-    reportPointCount,
-    /** @deprecated prefer rawSampleCount — kept for transitional exporters */
-    telemetrySampleCount: rawSampleCount,
-    faultEventCount: cov.faultEventCount ?? api?.fault_count ?? 0,
-    recoveryEventCount: cov.recoveryEventCount ?? api?.recovery_count ?? 0,
-    digitalTwinCount: cov.digitalTwinCount ?? api?.digital_twin_count ?? 0,
+    coveragePercent: cov.coveragePercent,
+    coverageDurationLabel: formatDurationSeconds(availSec),
+    requestedDurationLabel: formatDurationSeconds(reqSec),
+    telemetrySampleCount: cov.telemetrySampleCount ?? api.telemetry_raw_count ?? 0,
+    faultEventCount: cov.faultEventCount ?? api.fault_count ?? 0,
+    recoveryEventCount: cov.recoveryEventCount ?? api.recovery_count ?? 0,
+    digitalTwinCount: cov.digitalTwinCount ?? api.digital_twin_count ?? 0,
     retentionDays: cov.retentionDays ?? 30,
-    incomplete: status === "PARTIAL",
-    empty: status === "EMPTY" || reportPointCount === 0,
+    incomplete: cov.status === "PARTIAL",
+    empty: cov.status === "EMPTY" || !(api.telemetry?.length),
   };
 }
 
-function buildExecutiveSummary(samples, faults, recoveries, coverage, hostname) {
-  const crit = (faults || []).filter((f) => String(f.severity).toLowerCase() === "critical").length;
-  const warn = (faults || []).filter((f) => String(f.severity).toLowerCase() === "warning").length;
-  const resolved = (faults || []).filter(
-    (f) =>
-      String(f.status || "").toLowerCase().includes("resolved") ||
-      String(f.status || "").toLowerCase().includes("clear") ||
-      String(f.severity).toLowerCase() === "resolved"
+function buildExecutiveSummary(samples, faults, coverage, hostname) {
+  const crit = faults.filter((f) => String(f.severity).toLowerCase() === "critical").length;
+  const warn = faults.filter((f) => String(f.severity).toLowerCase() === "warning").length;
+  const resolved = faults.filter((f) =>
+    String(f.status || "").toLowerCase().includes("resolved") ||
+    String(f.severity).toLowerCase() === "resolved"
   ).length;
-  const unresolved = Math.max(0, (faults || []).length - resolved);
-  const recoveryActions = (recoveries || []).length;
-
-  const cpu = computeStats((samples || []).map((s) => s.cpu_usage));
-  const gpu = computeStats((samples || []).map((s) => s.gpu_util));
-  const mem = computeStats((samples || []).map((s) => s.mem_usage));
-  const gpuPeak = findPeakSample(samples, "gpu_util");
+  const unresolved = faults.length - resolved;
 
   let summary;
   if (coverage.empty) {
     summary =
-      `Host ${hostname || "unknown"} has no SQLite telemetry for the requested window. ` +
-      `Coverage status is EMPTY (${coverage.coveragePercent ?? 0}% of requested duration). ` +
-      `No live metrics were substituted. Fault events: ${faults.length}; recovery actions: ${recoveryActions}.`;
-  } else {
-    const bits = [];
-    if (cpu.count) bits.push(`CPU averaged ${fmtPct(cpu.avg)} (peak ${fmtPct(cpu.max)})`);
-    if (gpu.count) {
-      bits.push(
-        `GPU utilization peaked at ${fmtPct(gpuPeak.peak)}${gpuPeak.peakAt ? ` at ${gpuPeak.peakAt}` : ""}`
-      );
-    }
-    if (mem.count) bits.push(`memory averaged ${fmtPct(mem.avg)}`);
-    const coverageBit =
-      coverage.status === "PARTIAL"
-        ? `Available telemetry covers ${fmtDuration(coverage.availableSeconds)} ` +
-          `(${coverage.coveragePercent ?? "—"}% of the requested period; ${coverage.reportPointCount} report points / ${coverage.rawSampleCount} raw samples).`
-        : `Telemetry covers ${fmtDuration(coverage.availableSeconds)} with ${coverage.reportPointCount} report points from ${coverage.rawSampleCount} raw samples.`;
-
+      "No historical telemetry is available in the database for the requested reporting period. " +
+      "Historical sections below indicate unavailable data. No live metrics were substituted.";
+  } else if (coverage.incomplete) {
     summary =
-      `Host ${hostname || "unknown"} — ${bits.join("; ") || "component metrics were sparse"}. ` +
-      `${coverageBit} ` +
-      `Recorded faults: ${crit} critical, ${warn} warning (${faults.length} total); ` +
-      `${recoveryActions} recovery action(s); ${resolved} recovered / ${unresolved} unresolved.`;
+      `Historical data is incomplete for the requested period. ${coverage.notice} `;
+    const cpu = computeStats(samples.map((s) => s.cpu_usage));
+    const mem = computeStats(samples.map((s) => s.mem_usage));
+    const parts = [];
+    if (cpu.count) parts.push(`CPU averaged ${cpu.avg}%`);
+    if (mem.count) parts.push(`memory averaged ${mem.avg}%`);
+    if (parts.length) summary += `Over the available window, ${parts.join(" and ")}.`;
+  } else {
+    const cpu = computeStats(samples.map((s) => s.cpu_usage));
+    const mem = computeStats(samples.map((s) => s.mem_usage));
+    const parts = [];
+    if (cpu.count) parts.push(`CPU averaged ${cpu.avg}% utilization`);
+    if (mem.count) parts.push(`memory averaged ${mem.avg}%`);
+    summary = `System telemetry over the requested period shows ${parts.join(" and ") || "stable operation"}.`;
   }
 
+  if (crit > 0) summary += ` ${crit} critical fault event(s) were recorded.`;
+  else if (warn > 0) summary += ` ${warn} warning fault event(s) were recorded.`;
+  else if (!coverage.empty) summary += " No critical or warning fault events were recorded in this window.";
+
+  const latest = samples[samples.length - 1] || {};
   const byComponent = {};
-  (faults || []).forEach((f) => {
+  faults.forEach((f) => {
     if (String(f.severity).toLowerCase() === "critical") {
       byComponent[f.component] = (byComponent[f.component] || 0) + 1;
     }
@@ -484,23 +336,18 @@ function buildExecutiveSummary(samples, faults, recoveries, coverage, hostname) 
     Object.entries(byComponent).sort((a, b) => b[1] - a[1])[0]?.[0] ||
     (crit || warn ? faults[0]?.component : "None");
 
-  const latest = samples?.[samples.length - 1] || {};
-
   return {
-    overallHealth:
-      latest.lh_health ||
-      (crit ? "Critical" : warn ? "Warning" : coverage.empty ? "No Data" : "Healthy"),
+    overallHealth: latest.lh_health || (crit ? "Critical" : warn ? "Warning" : coverage.empty ? "No Data" : "Healthy"),
     healthScore: latest.lh_score ?? "Not Available",
-    monitoringDuration: coverage.availableSeconds ? coverage.coverageDurationLabel : "0",
-    sampleCount: coverage.reportPointCount,
-    rawSampleCount: coverage.rawSampleCount,
-    reportPointCount: coverage.reportPointCount,
+    monitoringDuration: coverage.availableSeconds
+      ? coverage.coverageDurationLabel
+      : "0",
+    sampleCount: samples.length,
     criticalAlerts: crit,
     warningAlerts: warn,
-    totalFaults: (faults || []).length,
+    totalFaults: faults.length,
     recoveredFaults: resolved,
     unresolvedFaults: unresolved,
-    recoveryActions,
     highestSeverityComponent,
     summary,
     hostname: hostname || latest.hostname || "Not Available",
@@ -508,518 +355,243 @@ function buildExecutiveSummary(samples, faults, recoveries, coverage, hostname) 
     kernel: "Not Available",
     requestedPeriod: coverage.requestedLabel,
     availablePeriod:
-      coverage.availableStart != null && coverage.availableEnd != null
-        ? `${fmtLocal(coverage.availableStart)} – ${fmtLocal(coverage.availableEnd)}`
+      coverage.availableStartIso && coverage.availableEndIso
+        ? `${formatLocal(coverage.availableStart)} – ${formatLocal(coverage.availableEnd)}`
         : "No telemetry available",
     dataCoveragePercent: coverage.coveragePercent,
     coverageStatus: coverage.status,
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Component sections                                                         */
-/* -------------------------------------------------------------------------- */
-
-function buildInterpretation({
-  name,
-  primaryKey,
-  unit,
-  stats,
-  peakAt,
-  pair,
-  warnCount,
-  critCount,
-  recoveries,
-}) {
-  if (!stats?.count) {
-    return `No historical ${name} telemetry was available in SQLite for the selected reporting period.`;
-  }
-
-  const avg = unit === "%" ? fmtPct(stats.avg) : unit ? `${fmtNum(stats.avg)}${unit}` : fmtNum(stats.avg);
-  const peak = unit === "%" ? fmtPct(stats.max) : unit ? `${fmtNum(stats.max)}${unit}` : fmtNum(stats.max);
-  const min = unit === "%" ? fmtPct(stats.min) : unit ? `${fmtNum(stats.min)}${unit}` : fmtNum(stats.min);
-
-  const crossedCrit = pair?.critical != null && stats.max >= pair.critical;
-  const crossedWarn = pair?.warning != null && stats.max >= pair.warning;
-  const thresholdBit = crossedCrit
-    ? `Peak crossed the critical threshold (>=${pair.critical}${unit === "%" ? "%" : unit}).`
-    : crossedWarn
-      ? `Peak crossed the warning threshold (>=${pair.warning}${unit === "%" ? "%" : unit}).`
-      : pair?.warning != null
-        ? `Peak remained below the warning threshold (>=${pair.warning}${unit === "%" ? "%" : unit}).`
-        : "No report threshold is defined for this primary metric.";
-
-  const peakBit = peakAt ? ` Peak occurred at ${peakAt}.` : "";
-  const eventBit =
-    critCount || warnCount
-      ? ` Correlated events: ${critCount} critical and ${warnCount} warning spike/fault marker(s).`
-      : " No threshold spike or fault markers were correlated for this component.";
-  const recoveryBit =
-    recoveries > 0
-      ? ` ${recoveries} recovery action(s) were recorded for this component.`
-      : "";
-
-  return (
-    `${name} averaged ${avg} over the available window (min ${min}, peak ${peak}).` +
-    peakBit +
-    ` ${thresholdBit}` +
-    eventBit +
-    recoveryBit +
-    ` Trend: ${stats.trend || "—"}.`
-  );
-}
-
-function countComponentEvents(name, faults, spikes) {
-  const relatedFaults = (faults || []).filter((f) => matchComponent(f.component, name));
-  const relatedSpikes = (spikes || []).filter((s) => matchComponent(s.component, name));
-  const warnCount =
-    relatedFaults.filter((f) => String(f.severity).toLowerCase() === "warning").length +
-    relatedSpikes.filter((s) => String(s.severity).toLowerCase() === "warning").length;
-  const critCount =
-    relatedFaults.filter((f) => String(f.severity).toLowerCase() === "critical").length +
-    relatedSpikes.filter((s) => String(s.severity).toLowerCase() === "critical").length;
-  return { warnCount, critCount, relatedFaults };
-}
-
-function buildComponentSections(samples, faults, spikes, recoveries) {
-  const latest = samples?.[samples.length - 1] || {};
+function buildHardwareMetrics(samples) {
+  const rows = [];
   const defs = [
+    ["CPU Usage", "cpu_usage", "%"],
+    ["CPU Temperature", "cpu_temp", "°C"],
+    ["CPU Load (1 min)", "cpu_load_1", ""],
+    ["CPU User", "cpu_user", "%"],
+    ["CPU System", "cpu_system", "%"],
+    ["Memory Usage", "mem_usage", "%"],
+    ["Memory Available", "mem_available_gb", " GB"],
+    ["Swap Usage", "mem_swap", "%"],
+    ["GPU Temperature", "gpu_temp", "°C"],
+    ["GPU Utilization", "gpu_util", "%"],
+    ["GPU VRAM Usage", "gpu_vram", "%"],
+    ["GPU Power Draw", "gpu_power", "W"],
+    ["NIC Utilization", "nic_util", "%"],
+    ["NIC RX", "nic_rx", " Mbps"],
+    ["NIC TX", "nic_tx", " Mbps"],
+    ["NIC Error Count", "nic_errors", ""],
+    ["Disk / I/O Busy", "io_busy", "%"],
+    ["I/O Throughput", "io_total_mbps", " MB/s"],
+    ["I/O IOPS", "io_iops", ""],
+    ["I/O Queue Depth", "io_queue", ""],
+    ["I/O Latency", "io_latency", " ms"],
+    ["Link Health Score", "lh_score", ""],
+  ];
+
+  defs.forEach(([label, key, suffix]) => {
+    const stats = computeStats(samples.map((s) => s[key]));
+    if (stats.count === 0) return;
+    rows.push([
+      label,
+      `${stats.avg}${suffix}`,
+      `${stats.min}${suffix}`,
+      `${stats.max}${suffix}`,
+      `${stats.current}${suffix}`,
+      stats.trend,
+    ]);
+  });
+
+  const mountKeys = new Set();
+  samples.forEach((s) => (s.disk_mounts || []).forEach((m) => mountKeys.add(m.mp)));
+  mountKeys.forEach((mp) => {
+    const stats = computeStats(
+      samples.map((s) => (s.disk_mounts || []).find((m) => m.mp === mp)?.pct ?? null)
+    );
+    if (stats.count === 0) return;
+    rows.push([
+      `Disk ${mp} Capacity`,
+      `${stats.avg}%`,
+      `${stats.min}%`,
+      `${stats.max}%`,
+      `${stats.current}%`,
+      stats.trend,
+    ]);
+  });
+
+  return rows;
+}
+
+function seriesFromSamples(samples, key, label, suffix) {
+  const points = samples
+    .filter((s) => s[key] != null && s.t != null)
+    .map((s) => ({ t: s.t, v: s[key], collected_at: s.collected_at }));
+  if (points.length < 2) return null;
+  return { key, label, suffix, points, unit: suffix };
+}
+
+function buildTrendSeries(samples) {
+  const series = [];
+  const defs = [
+    ["cpu_usage", "CPU Utilization (%)", "%"],
+    ["gpu_util", "GPU Utilization (%)", "%"],
+    ["mem_usage", "RAM Usage (%)", "%"],
+    ["io_busy", "Disk Busy (%)", "%"],
+    ["nic_util", "NIC Utilization (%)", "%"],
+    ["io_total_mbps", "I/O Throughput (MB/s)", " MB/s"],
+    ["cpu_temp", "CPU Temperature (°C)", "°C"],
+    ["gpu_temp", "GPU Temperature (°C)", "°C"],
+    ["io_latency", "Disk / I/O Latency (ms)", " ms"],
+    ["io_queue", "I/O Queue Depth", ""],
+    ["io_iops", "I/O IOPS", ""],
+    ["nic_rx", "NIC RX (Mbps)", " Mbps"],
+    ["nic_tx", "NIC TX (Mbps)", " Mbps"],
+    ["lh_score", "Link Health Score", ""],
+  ];
+  defs.forEach(([key, label, suffix]) => {
+    const s = seriesFromSamples(samples, key, label, suffix);
+    if (s) series.push(s);
+  });
+  return series;
+}
+
+function buildOverallHealthGraph(samples) {
+  const series = [];
+  [
+    ["cpu_usage", "CPU"],
+    ["gpu_util", "GPU"],
+    ["mem_usage", "RAM"],
+    ["io_busy", "Disk"],
+    ["nic_util", "NIC"],
+    ["io_total_mbps", "I/O"],
+  ].forEach(([key, label]) => {
+    const points = samples
+      .filter((s) => s[key] != null && s.t != null)
+      .map((s) => ({ t: s.t, v: s[key] }));
+    if (points.length >= 2) series.push({ key, label, points });
+  });
+  return {
+    title: "Overall Component Health Trend",
+    xAxis: "Time",
+    yAxis: "Health / Utilization (%)",
+    series,
+  };
+}
+
+function buildComponentAnalysis(samples, faults) {
+  const latest = samples[samples.length - 1] || {};
+  const components = [
     {
       name: "CPU",
-      title: "CPU HEALTH ANALYSIS",
-      primaryKey: "cpu_usage",
-      unit: "%",
-      thresholds: REPORT_THRESHOLDS.CPU.utilization,
-      thresholdLabel: thresholdLabel(thresholdPair(REPORT_THRESHOLDS.CPU.utilization), "%"),
-      latestRecorded: () =>
-        [
-          ["Usage", fmtPct(latest.cpu_usage)],
-          ["Temperature", latest.cpu_temp != null ? `${fmtNum(latest.cpu_temp)}°C` : "—"],
-          ["Load 1m", fmtNum(latest.cpu_load_1)],
-          ["User", fmtPct(latest.cpu_user)],
-          ["System", fmtPct(latest.cpu_system)],
-        ],
-      charts: [
-        {
-          key: "cpu_usage",
-          title: "CPU Utilization Over Time",
-          unit: "%",
-          yLabel: "Utilization (%)",
-          thresholds: REPORT_THRESHOLDS.CPU.utilization,
-        },
-        {
-          key: "cpu_temp",
-          title: "CPU Temperature",
-          unit: "°C",
-          yLabel: "Temperature (°C)",
-          thresholds: REPORT_THRESHOLDS.CPU.temperature,
-        },
+      keys: ["cpu_usage", "cpu_temp", "cpu_load_1"],
+      metrics: [
+        ["Usage", latest.cpu_usage != null ? `${latest.cpu_usage}%` : null],
+        ["Temperature", latest.cpu_temp != null ? `${latest.cpu_temp}°C` : null],
+        ["Load 1m", latest.cpu_load_1 != null ? String(latest.cpu_load_1) : null],
       ],
     },
     {
       name: "GPU",
-      title: "GPU HEALTH ANALYSIS",
-      primaryKey: "gpu_util",
-      unit: "%",
-      thresholds: REPORT_THRESHOLDS.GPU.utilization,
-      thresholdLabel: thresholdLabel(thresholdPair(REPORT_THRESHOLDS.GPU.utilization), "%"),
-      latestRecorded: () =>
-        [
-          ["Utilization", fmtPct(latest.gpu_util)],
-          ["VRAM", fmtPct(latest.gpu_vram)],
-          ["Temperature", latest.gpu_temp != null ? `${fmtNum(latest.gpu_temp)}°C` : "—"],
-          ["Power", latest.gpu_power != null ? `${fmtNum(latest.gpu_power)} W` : "—"],
-          ["Model", latest.gpu_model || "—"],
-        ],
-      charts: [
-        {
-          key: "gpu_util",
-          title: "GPU Utilization Over Time",
-          unit: "%",
-          yLabel: "Utilization (%)",
-          thresholds: REPORT_THRESHOLDS.GPU.utilization,
-        },
-        {
-          key: "gpu_vram",
-          title: "VRAM Usage Over Time",
-          unit: "%",
-          yLabel: "VRAM (%)",
-          thresholds: null,
-        },
-        {
-          key: "gpu_temp",
-          title: "GPU Temperature Over Time",
-          unit: "°C",
-          yLabel: "Temperature (°C)",
-          thresholds: REPORT_THRESHOLDS.GPU.temperature,
-        },
+      keys: ["gpu_util", "gpu_temp", "gpu_vram"],
+      metrics: [
+        ["Utilization", latest.gpu_util != null ? `${latest.gpu_util}%` : null],
+        ["VRAM", latest.gpu_vram != null ? `${latest.gpu_vram}%` : null],
+        ["Temperature", latest.gpu_temp != null ? `${latest.gpu_temp}°C` : null],
+        ["Model", latest.gpu_model || null],
       ],
     },
     {
       name: "RAM",
-      title: "RAM HEALTH ANALYSIS",
-      primaryKey: "mem_usage",
-      unit: "%",
-      thresholds: REPORT_THRESHOLDS.RAM.utilization,
-      thresholdLabel: thresholdLabel(thresholdPair(REPORT_THRESHOLDS.RAM.utilization), "%"),
-      latestRecorded: () =>
-        [
-          ["Usage", fmtPct(latest.mem_usage)],
-          ["Available", latest.mem_available_gb != null ? `${fmtNum(latest.mem_available_gb)} GB` : "—"],
-          ["Used", latest.mem_used_gb != null ? `${fmtNum(latest.mem_used_gb)} GB` : "—"],
-          ["Total", latest.mem_total_gb != null ? `${fmtNum(latest.mem_total_gb)} GB` : "—"],
-          ["Swap", fmtPct(latest.mem_swap)],
-        ],
-      charts: [
-        {
-          key: "mem_usage",
-          title: "Memory Utilization Over Time",
-          unit: "%",
-          yLabel: "Usage (%)",
-          thresholds: REPORT_THRESHOLDS.RAM.utilization,
-        },
-        {
-          key: "mem_available_gb",
-          title: "Available Memory Over Time",
-          unit: " GB",
-          yLabel: "Available (GB)",
-          thresholds: null,
-        },
-        {
-          key: "mem_swap",
-          title: "Swap Usage",
-          unit: "%",
-          yLabel: "Swap (%)",
-          thresholds: REPORT_THRESHOLDS.RAM.swap,
-        },
+      keys: ["mem_usage", "mem_available_gb", "mem_swap"],
+      metrics: [
+        ["Usage", latest.mem_usage != null ? `${latest.mem_usage}%` : null],
+        ["Available", latest.mem_available_gb != null ? `${latest.mem_available_gb} GB` : null],
+        ["Swap", latest.mem_swap != null ? `${latest.mem_swap}%` : null],
       ],
     },
     {
       name: "DISK",
-      title: "DISK HEALTH ANALYSIS",
-      primaryKey: "io_busy",
-      unit: "%",
-      thresholds: REPORT_THRESHOLDS.DISK.busy,
-      thresholdLabel: thresholdLabel(thresholdPair(REPORT_THRESHOLDS.DISK.busy), "%"),
-      latestRecorded: () => {
-        const mountBits = (latest.disk_mounts || [])
-          .slice(0, 3)
-          .map((m) => [String(m.mp), m.pct != null ? fmtPct(m.pct) : "—"]);
-        return [
-          ["Busy", fmtPct(latest.io_busy)],
-          ["Throughput", latest.io_total_mbps != null ? `${fmtNum(latest.io_total_mbps)} MB/s` : "—"],
-          ["IOPS", fmtInt(latest.io_iops)],
-          ["Latency", latest.io_latency != null ? `${fmtNum(latest.io_latency)} ms` : "—"],
-          ["Queue", fmtNum(latest.io_queue)],
-          ["Device", latest.io_device || "—"],
-          ...mountBits,
-        ];
-      },
-      charts: [
-        {
-          key: "io_busy",
-          title: "Disk Busy Over Time",
-          unit: "%",
-          yLabel: "Busy (%)",
-          thresholds: REPORT_THRESHOLDS.DISK.busy,
-        },
-        {
-          key: "io_total_mbps",
-          title: "Disk Throughput",
-          unit: " MB/s",
-          yLabel: "Throughput (MB/s)",
-          thresholds: REPORT_THRESHOLDS.DISK.throughput,
-        },
-        {
-          key: "io_iops",
-          title: "Disk IOPS",
-          unit: "",
-          yLabel: "IOPS",
-          thresholds: null,
-        },
-        {
-          key: "io_latency",
-          title: "Disk Latency",
-          unit: " ms",
-          yLabel: "Latency (ms)",
-          thresholds: REPORT_THRESHOLDS.DISK.latency,
-        },
-        {
-          key: "io_queue",
-          title: "Disk Queue Depth",
-          unit: "",
-          yLabel: "Queue Depth",
-          thresholds: REPORT_THRESHOLDS.DISK.queue,
-        },
+      keys: ["io_busy"],
+      metrics: [
+        ["Busy", latest.io_busy != null ? `${latest.io_busy}%` : null],
+        ["Device", latest.io_device || null],
       ],
     },
     {
       name: "NIC",
-      title: "NIC HEALTH ANALYSIS",
-      primaryKey: "nic_util",
-      unit: "%",
-      thresholds: REPORT_THRESHOLDS.NIC.utilization,
-      thresholdLabel: thresholdLabel(thresholdPair(REPORT_THRESHOLDS.NIC.utilization), "%"),
-      latestRecorded: () =>
-        [
-          ["Utilization", fmtPct(latest.nic_util)],
-          ["RX", latest.nic_rx != null ? `${fmtNum(latest.nic_rx)} Mbps` : "—"],
-          ["TX", latest.nic_tx != null ? `${fmtNum(latest.nic_tx)} Mbps` : "—"],
-          ["Errors", fmtInt(latest.nic_errors)],
-          ["Links Up", fmtInt(latest.nic_up)],
-        ],
-      charts: [
-        {
-          key: "nic_util",
-          title: "NIC Utilization Over Time",
-          unit: "%",
-          yLabel: "Utilization (%)",
-          thresholds: REPORT_THRESHOLDS.NIC.utilization,
-        },
-        {
-          key: "nic_rx",
-          title: "NIC RX",
-          unit: " Mbps",
-          yLabel: "RX (Mbps)",
-          thresholds: null,
-        },
-        {
-          key: "nic_tx",
-          title: "NIC TX",
-          unit: " Mbps",
-          yLabel: "TX (Mbps)",
-          thresholds: null,
-        },
+      keys: ["nic_util", "nic_rx", "nic_tx", "nic_errors"],
+      metrics: [
+        ["Utilization", latest.nic_util != null ? `${latest.nic_util}%` : null],
+        ["RX", latest.nic_rx != null ? `${latest.nic_rx} Mbps` : null],
+        ["TX", latest.nic_tx != null ? `${latest.nic_tx} Mbps` : null],
+        ["Errors", latest.nic_errors != null ? String(latest.nic_errors) : null],
       ],
     },
     {
-      name: "IO",
-      title: "IO HEALTH ANALYSIS",
-      primaryKey: "io_total_mbps",
-      unit: " MB/s",
-      thresholds: REPORT_THRESHOLDS.IO.throughput,
-      thresholdLabel: thresholdLabel(thresholdPair(REPORT_THRESHOLDS.IO.throughput), " MB/s"),
-      latestRecorded: () =>
-        [
-          ["Throughput", latest.io_total_mbps != null ? `${fmtNum(latest.io_total_mbps)} MB/s` : "—"],
-          ["IOPS", fmtInt(latest.io_iops)],
-          ["Queue", fmtNum(latest.io_queue)],
-          ["Latency", latest.io_latency != null ? `${fmtNum(latest.io_latency)} ms` : "—"],
-          ["Device", latest.io_device || "—"],
-        ],
-      charts: [
-        {
-          key: "io_total_mbps",
-          title: "I/O Throughput",
-          unit: " MB/s",
-          yLabel: "Throughput (MB/s)",
-          thresholds: REPORT_THRESHOLDS.IO.throughput,
-        },
-        {
-          key: "io_iops",
-          title: "I/O IOPS",
-          unit: "",
-          yLabel: "IOPS",
-          thresholds: null,
-        },
-        {
-          key: "io_queue",
-          title: "I/O Queue Depth",
-          unit: "",
-          yLabel: "Queue Depth",
-          thresholds: REPORT_THRESHOLDS.IO.queue,
-        },
-        {
-          key: "io_latency",
-          title: "I/O Latency",
-          unit: " ms",
-          yLabel: "Latency (ms)",
-          thresholds: REPORT_THRESHOLDS.IO.latency,
-        },
+      name: "IO Control",
+      keys: ["io_total_mbps", "io_iops", "io_queue", "io_latency"],
+      metrics: [
+        ["Throughput", latest.io_total_mbps != null ? `${latest.io_total_mbps} MB/s` : null],
+        ["IOPS", latest.io_iops != null ? String(latest.io_iops) : null],
+        ["Queue", latest.io_queue != null ? String(latest.io_queue) : null],
+        ["Latency", latest.io_latency != null ? `${latest.io_latency} ms` : null],
       ],
     },
   ];
 
-  return defs.map((def) => {
-    const stats = computeStats((samples || []).map((s) => s[def.primaryKey]));
-    const { peak, peakAt } = findPeakSample(samples, def.primaryKey);
-    const pair = thresholdPair(def.thresholds);
-    const peakStatus = levelFromValue(peak ?? stats.max, pair);
-    const { warnCount, critCount, relatedFaults } = countComponentEvents(
-      def.name,
-      faults,
-      spikes
-    );
-    const componentRecoveries = (recoveries || []).filter((r) =>
-      matchComponent(r.component, def.name)
-    ).length;
-
-    let status = stats.count ? peakStatus : "nodata";
-    if (critCount > 0) status = worstStatus(status, "critical");
-    else if (warnCount > 0) status = worstStatus(status, "warning");
-
-    const charts = (def.charts || [])
-      .map((c) => makeChart(samples, c))
-      .filter(Boolean);
-
-    const interpretation = buildInterpretation({
-      name: def.name,
-      primaryKey: def.primaryKey,
-      unit: def.unit,
-      stats,
-      peakAt,
-      pair,
-      warnCount,
-      critCount,
-      recoveries: componentRecoveries,
+  return components.map((c) => {
+    const stats = computeStats(samples.map((s) => s[c.keys[0]]));
+    const componentFaults = faults.filter((f) => {
+      const name = String(f.component || "").toLowerCase();
+      const target = c.name.toLowerCase().replace(" control", "");
+      return name.includes(target) || name === c.name.toLowerCase();
     });
+    let level = "unknown";
+    if (stats.count) {
+      if (c.keys[0] === "cpu_usage" || c.keys[0] === "mem_usage" || c.keys[0] === "gpu_util" || c.keys[0] === "io_busy") {
+        if (stats.max >= 90) level = "critical";
+        else if (stats.max >= 75) level = "warning";
+        else level = "healthy";
+      } else {
+        level = "healthy";
+      }
+    }
+    if (componentFaults.some((f) => String(f.severity).toLowerCase() === "critical")) level = "critical";
+    else if (componentFaults.some((f) => String(f.severity).toLowerCase() === "warning") && level === "healthy") {
+      level = "warning";
+    }
 
     return {
-      name: def.name,
-      title: def.title,
-      status,
-      statusLabel: statusTitle(status),
-      stats: {
-        avg: stats.avg,
-        min: stats.min,
-        max: stats.max,
-        current: stats.current,
-        trend: stats.trend,
-        count: stats.count,
-      },
-      latestRecorded: def.latestRecorded().filter(([, v]) => v != null && v !== ""),
-      thresholds: def.thresholdLabel,
-      thresholdLabel: def.thresholdLabel,
-      warnCount,
-      critCount,
-      charts,
-      interpretation,
-      peakAt,
-      faults: relatedFaults,
+      name: c.name,
+      level,
+      status: stats.count
+        ? `Avg ${stats.avg ?? "—"}, peak ${stats.max ?? "—"} over available historical window.`
+        : "No historical samples for this component in the selected period.",
+      faults: componentFaults,
+      liveMetrics: c.metrics.filter(([, v]) => v != null),
+      inventory: [],
+      stats,
     };
   });
 }
 
-function buildComponentOverview(componentSections) {
-  return (componentSections || []).map((c) => ({
-    component: c.name,
-    status: c.status,
-    avg:
-      c.stats?.avg == null
-        ? "—"
-        : c.name === "IO"
-          ? `${fmtNum(c.stats.avg)} MB/s`
-          : fmtPct(c.stats.avg),
-    peak:
-      c.stats?.max == null
-        ? "—"
-        : c.name === "IO"
-          ? `${fmtNum(c.stats.max)} MB/s`
-          : fmtPct(c.stats.max),
-    min:
-      c.stats?.min == null
-        ? "—"
-        : c.name === "IO"
-          ? `${fmtNum(c.stats.min)} MB/s`
-          : fmtPct(c.stats.min),
-    thresholdLabel: c.thresholdLabel || c.thresholds || "—",
-    warnings: c.warnCount || 0,
-    criticals: c.critCount || 0,
-    trend: c.stats?.trend || "—",
-  }));
-}
-
-/* -------------------------------------------------------------------------- */
-/* Spikes / logbook / recommendations                                         */
-/* -------------------------------------------------------------------------- */
-
 function buildSpikeAnalysis(samples, faults) {
   const spikes = [];
   const metricMap = [
-    {
-      key: "cpu_usage",
-      component: "CPU",
-      pair: thresholdPair(REPORT_THRESHOLDS.CPU.utilization),
-      label: "CPU utilization",
-      unit: "%",
-    },
-    {
-      key: "mem_usage",
-      component: "RAM",
-      pair: thresholdPair(REPORT_THRESHOLDS.RAM.utilization),
-      label: "Memory usage",
-      unit: "%",
-    },
-    {
-      key: "gpu_util",
-      component: "GPU",
-      pair: thresholdPair(REPORT_THRESHOLDS.GPU.utilization),
-      label: "GPU utilization",
-      unit: "%",
-    },
-    {
-      key: "io_busy",
-      component: "DISK",
-      pair: thresholdPair(REPORT_THRESHOLDS.DISK.busy),
-      label: "Disk busy",
-      unit: "%",
-    },
-    {
-      key: "nic_util",
-      component: "NIC",
-      pair: thresholdPair(REPORT_THRESHOLDS.NIC.utilization),
-      label: "NIC utilization",
-      unit: "%",
-    },
-    {
-      key: "io_total_mbps",
-      component: "IO",
-      pair: thresholdPair(REPORT_THRESHOLDS.IO.throughput),
-      label: "I/O throughput",
-      unit: " MB/s",
-    },
+    { key: "cpu_usage", component: "CPU", warn: 75, crit: 90, label: "CPU utilization" },
+    { key: "mem_usage", component: "RAM", warn: 80, crit: 90, label: "Memory usage" },
+    { key: "gpu_util", component: "GPU", warn: 80, crit: 95, label: "GPU utilization" },
+    { key: "io_busy", component: "DISK", warn: 70, crit: 90, label: "Disk busy" },
+    { key: "nic_util", component: "NIC", warn: 70, crit: 90, label: "NIC utilization" },
   ];
 
-  metricMap.forEach(({ key, component, pair, label, unit }) => {
-    if (!pair?.warning && !pair?.critical) return;
-    const warn = pair.warning ?? pair.critical;
-    const crit = pair.critical ?? null;
+  metricMap.forEach(({ key, component, warn, crit, label }) => {
     let inSpike = false;
     let startIdx = null;
     let peak = null;
     let peakIdx = null;
-
-    const emit = (endIdx, openEnded) => {
-      const preVal = startIdx > 0 ? samples[startIdx - 1][key] : null;
-      const postVal = openEnded ? null : samples[endIdx]?.[key];
-      const endSample = samples[openEnded ? samples.length - 1 : Math.max(endIdx - 1, startIdx)];
-      const durationSec =
-        (endSample?.collected_at ?? samples[startIdx].collected_at) - samples[startIdx].collected_at;
-      const possibleCause =
-        "Elevated values were observed in historical telemetry around the peak. " +
-        "Available SQLite samples do not include sufficient process attribution to confirm a root cause.";
-
-      spikes.push({
-        component,
-        metric: label,
-        timestamp: fmtLocal(samples[peakIdx].collected_at),
-        t: samples[peakIdx].t,
-        peak,
-        before: preVal,
-        after: postVal,
-        preSpikeValue: preVal,
-        postSpikeValue: postVal,
-        duration: fmtDuration(durationSec),
-        durationSeconds: durationSec,
-        threshold: peak >= (crit ?? Infinity) ? crit : warn,
-        severity: peak >= (crit ?? Infinity) ? "Critical" : "Warning",
-        unit,
-        possibleCause,
-        reasonForSpike: possibleCause,
-      });
-    };
-
-    for (let i = 0; i < (samples || []).length; i += 1) {
+    for (let i = 0; i < samples.length; i += 1) {
       const v = samples[i][key];
       if (v == null) continue;
       if (v >= warn) {
@@ -1033,23 +605,59 @@ function buildSpikeAnalysis(samples, faults) {
           peakIdx = i;
         }
       } else if (inSpike) {
-        emit(i, false);
+        const pre = startIdx > 0 ? samples[startIdx - 1][key] : null;
+        const post = samples[i][key];
+        spikes.push({
+          component,
+          metric: label,
+          timestamp: formatLocal(samples[peakIdx].collected_at),
+          t: samples[peakIdx].t,
+          peak,
+          threshold: peak >= crit ? crit : warn,
+          severity: peak >= crit ? "Critical" : "Warning",
+          duration: formatDurationSeconds(
+            samples[i - 1].collected_at - samples[startIdx].collected_at
+          ),
+          preSpikeValue: pre,
+          postSpikeValue: post,
+          reasonForSpike:
+            "An elevated period was observed in historical telemetry. " +
+            "The available telemetry does not provide sufficient evidence to determine the cause.",
+        });
         inSpike = false;
-        startIdx = null;
       }
     }
-    if (inSpike && startIdx != null) emit(samples.length - 1, true);
+    if (inSpike && startIdx != null) {
+      spikes.push({
+        component,
+        metric: label,
+        timestamp: formatLocal(samples[peakIdx].collected_at),
+        t: samples[peakIdx].t,
+        peak,
+        threshold: peak >= crit ? crit : warn,
+        severity: peak >= crit ? "Critical" : "Warning",
+        duration: formatDurationSeconds(
+          samples[samples.length - 1].collected_at - samples[startIdx].collected_at
+        ),
+        preSpikeValue: startIdx > 0 ? samples[startIdx - 1][key] : null,
+        postSpikeValue: null,
+        reasonForSpike:
+          "An elevated period was observed in historical telemetry. " +
+          "The available telemetry does not provide sufficient evidence to determine the cause.",
+      });
+    }
   });
 
-  (faults || []).forEach((f) => {
+  // Enrich fault logbook rows with spike correlation when timestamps align (~5 min)
+  faults.forEach((f) => {
     const near = spikes.find(
       (s) =>
-        matchComponent(s.component, f.component) &&
+        s.component.toLowerCase() === String(f.component || "").toLowerCase() &&
         f.t &&
         Math.abs(s.t - f.t) < 5 * 60 * 1000
     );
     if (near) {
-      f.reasonForSpike = near.possibleCause;
+      f.reasonForSpike = near.reasonForSpike;
       f.peakValue = f.peakValue ?? near.peak;
       f.thresholdCrossed = f.thresholdCrossed || String(near.threshold);
     } else if (!f.reasonForSpike) {
@@ -1061,566 +669,143 @@ function buildSpikeAnalysis(samples, faults) {
   return spikes;
 }
 
+function buildVisualAnalysis(samples, faults, spikes) {
+  const analyses = [];
+  const components = [
+    { name: "CPU", key: "cpu_usage", unit: "%" },
+    { name: "GPU", key: "gpu_util", unit: "%" },
+    { name: "RAM", key: "mem_usage", unit: "%" },
+    { name: "Disk", key: "io_busy", unit: "%" },
+    { name: "NIC", key: "nic_util", unit: "%" },
+    { name: "I/O", key: "io_total_mbps", unit: " MB/s" },
+  ];
+
+  components.forEach(({ name, key, unit }) => {
+    const stats = computeStats(samples.map((s) => s[key]));
+    if (!stats.count) {
+      analyses.push({
+        component: name,
+        commentary: `No historical ${name} telemetry was available for the selected reporting period.`,
+        average: null,
+        peak: null,
+        minimum: null,
+        warningEvents: 0,
+        criticalEvents: 0,
+      });
+      return;
+    }
+    const relatedFaults = faults.filter((f) =>
+      String(f.component || "").toLowerCase().includes(name.toLowerCase().replace("/", ""))
+    );
+    const relatedSpikes = spikes.filter((s) => s.component.toLowerCase().includes(name.toLowerCase().split("/")[0].toLowerCase()) || s.component === name);
+    const warn = relatedFaults.filter((f) => String(f.severity).toLowerCase() === "warning").length
+      + relatedSpikes.filter((s) => s.severity === "Warning").length;
+    const crit = relatedFaults.filter((f) => String(f.severity).toLowerCase() === "critical").length
+      + relatedSpikes.filter((s) => s.severity === "Critical").length;
+
+    let commentary;
+    if (relatedSpikes.length === 0 && crit === 0 && warn === 0) {
+      commentary =
+        `${name} remained within observed healthy operating levels for most of the available ` +
+        `historical window (average ${stats.avg}${unit}, peak ${stats.max}${unit}).`;
+    } else if (relatedSpikes.length > 0) {
+      const s0 = relatedSpikes[0];
+      commentary =
+        `${name} averaged ${stats.avg}${unit} with a peak of ${stats.max}${unit}. ` +
+        `A sustained increase was observed around ${s0.timestamp}, during which the metric ` +
+        `crossed the ${s0.severity.toLowerCase()} threshold (${s0.threshold}${unit}). ` +
+        `The available telemetry does not provide sufficient evidence to determine the cause.`;
+    } else {
+      commentary =
+        `${name} averaged ${stats.avg}${unit} (peak ${stats.max}${unit}). ` +
+        `${warn + crit} related fault event(s) were recorded in the historical database.`;
+    }
+
+    analyses.push({
+      component: name,
+      commentary,
+      average: stats.avg,
+      peak: stats.max,
+      minimum: stats.min,
+      warningEvents: warn,
+      criticalEvents: crit,
+    });
+  });
+
+  return analyses;
+}
+
 function buildLogbook(faults) {
-  const rows = (faults || []).map((f) => ({
-    component: f.component || "—",
-    severity: f.severity || "—",
+  return faults.map((f) => ({
+    component: f.component,
+    severity: f.severity,
     reason: f.description || f.message || "—",
-    faultDetected: f.faultDetected || "—",
-    faultCorrected: f.faultCorrected || "—",
-    duration: f.durationLabel || "—",
+    faultDetected: f.faultDetected,
+    faultCorrected: f.faultCorrected,
+    duration: f.durationLabel,
     peak: f.peakValue ?? f.currentValue ?? "—",
     threshold: f.thresholdCrossed || "—",
     reasonForSpike: f.reasonForSpike || "—",
     remarks: f.remarks || "—",
     status: f.status || "—",
   }));
-
-  return {
-    rows,
-    emptyMessage:
-      rows.length === 0
-        ? "NO FAULT EVENTS RECORDED. No warning or critical fault events were recorded in the selected historical reporting period."
-        : null,
-  };
 }
 
-/**
- * Assign Event IDs and correlate faults <-> recoveries by component + time.
- * Correlation window: recovery within 0..30 minutes after fault first-seen.
- */
-function buildCorrelatedLogs(faults, recoveries) {
-  const faultEvents = (faults || []).map((f, i) => {
-    const eventId = `FE-${String(i + 1).padStart(3, "0")}`;
-    return {
-      ...f,
-      eventId,
-      eventType: "fault",
-      metric: f.metricName || "—",
-      observedValue: f.peakValue ?? f.currentValue ?? "—",
-      threshold: f.thresholdCrossed || "—",
-      faultReason: f.description || f.message || "—",
-      detectionStatus: f.status || "Active",
-      correctedAt: f.faultCorrected || "Correction time unavailable.",
-      duration: f.durationLabel || "—",
-      recoveryAction: null,
-      recoveryId: null,
-      finalStatus: f.status || "—",
-      correlation: "Correlation unavailable from historical records.",
-    };
-  });
-
-  const recoveryEvents = (recoveries || []).map((r, i) => {
-    const recoveryId = `RA-${String(i + 1).padStart(3, "0")}`;
-    return {
-      ...r,
-      recoveryId,
-      eventType: "recovery",
-      trigger: r.trigger || "Operator-initiated / recorded recovery",
-      faultEventId: null,
-      correlation: "Fault correlation: Not available",
-    };
-  });
-
-  const WINDOW_MS = 30 * 60 * 1000;
-  faultEvents.forEach((f) => {
-    if (f.t == null) return;
-    const candidates = recoveryEvents.filter(
-      (r) =>
-        r.t != null &&
-        matchComponent(r.component, f.component) &&
-        r.t >= f.t - 60 * 1000 &&
-        r.t <= f.t + WINDOW_MS
-    );
-    if (!candidates.length) return;
-    candidates.sort((a, b) => Math.abs(a.t - f.t) - Math.abs(b.t - f.t));
-    const best = candidates[0];
-    if (best.faultEventId) return;
-    best.faultEventId = f.eventId;
-    best.correlation = `Linked to ${f.eventId}`;
-    f.recoveryAction = best.action;
-    f.recoveryId = best.recoveryId;
-    f.finalStatus = best.success ? "Recovered" : best.status || f.finalStatus;
-    f.correlation = `Recovery ${best.recoveryId} (${best.action})`;
-  });
-
-  recoveryEvents.forEach((r) => {
-    if (!r.faultEventId) {
-      r.correlation =
-        "Recovery action recorded without a corresponding fault event in the selected historical fault table.";
-    }
-  });
-
-  return { faultEvents, recoveryEvents };
-}
-
-function buildInfrastructureTimeline(faultEvents, recoveryEvents, spikes) {
-  const items = [];
-  (faultEvents || []).forEach((f) => {
-    if (f.t == null) return;
-    items.push({
-      t: f.t,
-      timestamp: f.faultDetected || fmtLocal(f.t / 1000),
-      kind: "FAULT",
-      severity: f.severity,
-      component: f.component,
-      label: `${f.eventId}: ${f.faultReason}`,
-      detail: `Detected ${f.faultDetected}; peak ${f.observedValue}; threshold ${f.threshold}`,
-      id: f.eventId,
-    });
-  });
-  (recoveryEvents || []).forEach((r) => {
-    if (r.t == null && !r.timestamp) return;
-    const t = r.t ?? new Date(r.timestamp).getTime();
-    items.push({
-      t,
-      timestamp: r.time || fmtLocal(t / 1000),
-      kind: "RECOVERY",
-      severity: r.success ? "Success" : "Failed",
-      component: r.component,
-      label: `${r.recoveryId}: ${r.action}`,
-      detail: `PID ${r.pid}; result ${r.result}; verification ${r.verification}`,
-      id: r.recoveryId,
-      faultEventId: r.faultEventId,
-    });
-  });
-  (spikes || []).forEach((s, i) => {
-    if (s.t == null) return;
-    // Only include spikes that approach/cross warning (already filtered)
-    items.push({
-      t: s.t,
-      timestamp: s.timestamp,
-      kind: "SPIKE",
-      severity: s.severity,
-      component: s.component,
-      label: `SP-${String(i + 1).padStart(3, "0")}: ${s.metric} peak ${s.peak}${s.unit || ""}`,
-      detail: `Baseline ${s.before ?? "—"} -> peak ${s.peak}; threshold ${s.threshold}; duration ${s.duration}`,
-      id: `SP-${String(i + 1).padStart(3, "0")}`,
-    });
-  });
-  items.sort((a, b) => a.t - b.t);
-  return items;
-}
-
-function buildActivitySummary(faultEvents, recoveryEvents, spikes, digitalTwin, samples) {
-  const warnings = (faultEvents || []).filter((f) =>
-    String(f.severity).toLowerCase().includes("warn")
-  );
-  const criticals = (faultEvents || []).filter((f) =>
-    String(f.severity).toLowerCase().includes("crit")
-  );
-  const firstTs = (arr) => {
-    const withT = (arr || []).filter((x) => x && x.t != null);
-    if (!withT.length) return "—";
-    const first = withT.reduce((a, b) => (a.t <= b.t ? a : b));
-    return first.timestamp || first.time || first.faultDetected || "—";
-  };
-  const lastTs = (arr) => {
-    const withT = (arr || []).filter((x) => x && x.t != null);
-    if (!withT.length) return "—";
-    const last = withT.reduce((a, b) => (a.t >= b.t ? a : b));
-    return last.timestamp || last.time || last.faultDetected || "—";
-  };
-
-  const connectivity = (samples || []).filter(
-    (s) => s.lh_health && String(s.lh_health).toLowerCase() !== "healthy"
-  );
-
-  return [
-    {
-      category: "Faults",
-      count: (faultEvents || []).length,
-      firstEvent: firstTs(faultEvents || []),
-      lastEvent: lastTs(faultEvents || []),
-      highestSeverity: criticals.length ? "Critical" : warnings.length ? "Warning" : "None",
-      recoveryActions: (faultEvents || []).filter((f) => f.recoveryId).length,
-      result: (faultEvents || []).length ? "See fault log" : "No faults",
-    },
-    {
-      category: "Warnings",
-      count: warnings.length,
-      firstEvent: firstTs(warnings),
-      lastEvent: lastTs(warnings),
-      highestSeverity: warnings.length ? "Warning" : "None",
-      recoveryActions: warnings.filter((f) => f.recoveryId).length,
-      result: warnings.length ? "See fault log" : "None",
-    },
-    {
-      category: "Criticals",
-      count: criticals.length,
-      firstEvent: firstTs(criticals),
-      lastEvent: lastTs(criticals),
-      highestSeverity: criticals.length ? "Critical" : "None",
-      recoveryActions: criticals.filter((f) => f.recoveryId).length,
-      result: criticals.length ? "See fault log" : "None",
-    },
-    {
-      category: "Recoveries",
-      count: (recoveryEvents || []).length,
-      firstEvent: firstTs(recoveryEvents || []),
-      lastEvent: lastTs(recoveryEvents || []),
-      highestSeverity: (recoveryEvents || []).some((r) => !r.success) ? "Failed" : (recoveryEvents || []).length ? "Success" : "None",
-      recoveryActions: (recoveryEvents || []).length,
-      result: (recoveryEvents || []).length ? "See recovery log" : "No recoveries",
-    },
-    {
-      category: "Significant Spikes",
-      count: (spikes || []).length,
-      firstEvent: firstTs(spikes || []),
-      lastEvent: lastTs(spikes || []),
-      highestSeverity: (spikes || []).some((s) => s.severity === "Critical")
-        ? "Critical"
-        : (spikes || []).length
-          ? "Warning"
-          : "None",
-      recoveryActions: 0,
-      result: (spikes || []).length ? "See spike analysis" : "No significant spikes",
-    },
-    {
-      category: "Connectivity Events",
-      count: connectivity.length,
-      firstEvent: connectivity.length ? fmtLocal(connectivity[0].collected_at) : "—",
-      lastEvent: connectivity.length
-        ? fmtLocal(connectivity[connectivity.length - 1].collected_at)
-        : "—",
-      highestSeverity: connectivity.length ? "Degraded" : "None",
-      recoveryActions: 0,
-      result: connectivity.length ? "Link health not Healthy" : "Healthy / no events",
-    },
-    {
-      category: "Digital Twin Simulations",
-      count: (digitalTwin || []).length,
-      firstEvent: "—",
-      lastEvent: "—",
-      highestSeverity: "None",
-      recoveryActions: 0,
-      result: (digitalTwin || []).length ? "See Digital Twin section" : "None",
-    },
-  ];
-}
-
-function buildSystemResourceTrend(samples) {
-  const series = [];
-  const defs = [
-    { key: "cpu_usage", label: "CPU %", warning: thresholdPair(REPORT_THRESHOLDS.CPU.utilization)?.warning, critical: thresholdPair(REPORT_THRESHOLDS.CPU.utilization)?.critical },
-    { key: "mem_usage", label: "RAM %", warning: thresholdPair(REPORT_THRESHOLDS.RAM.utilization)?.warning, critical: thresholdPair(REPORT_THRESHOLDS.RAM.utilization)?.critical },
-    { key: "gpu_util", label: "GPU %", warning: thresholdPair(REPORT_THRESHOLDS.GPU.utilization)?.warning, critical: thresholdPair(REPORT_THRESHOLDS.GPU.utilization)?.critical },
-  ];
-  defs.forEach((d) => {
-    const points = (samples || [])
-      .filter((s) => s[d.key] != null && s.t != null)
-      .map((s) => ({ t: s.t, v: s[d.key] }));
-    if (points.length >= 2) {
-      series.push({
-        key: d.key,
-        label: d.label,
-        unit: "%",
-        yLabel: "Utilization (%)",
-        points,
-        warning: d.warning,
-        critical: d.critical,
-      });
-    }
-  });
-  return {
-    title: "System Resource Utilization (CPU / RAM / GPU %)",
-    unit: "%",
-    yLabel: "Utilization (%)",
-    series,
-    compatible: true,
-  };
-}
-
-function buildEventMarkerSeries(faultEvents, recoveryEvents) {
-  return {
-    faults: (faultEvents || [])
-      .filter((f) => f.t != null)
-      .map((f) => ({
-        t: f.t,
-        severity: f.severity,
-        component: f.component,
-        id: f.eventId,
-        label: f.eventId,
-      })),
-    recoveries: (recoveryEvents || [])
-      .filter((r) => r.t != null)
-      .map((r) => ({
-        t: r.t,
-        component: r.component,
-        id: r.recoveryId,
-        label: r.recoveryId,
-        result: r.result,
-        action: r.action,
-      })),
-  };
-}
-
-function enrichChartsWithMarkers(componentSections, faultEvents, recoveryEvents) {
-  return (componentSections || []).map((section) => {
-    const relatedFaults = (faultEvents || []).filter((f) =>
-      matchComponent(f.component, section.name)
-    );
-    const relatedRecoveries = (recoveryEvents || []).filter((r) =>
-      matchComponent(r.component, section.name)
-    );
-    return {
-      ...section,
-      charts: (section.charts || []).map((ch) => ({
-        ...ch,
-        eventMarkers: {
-          faults: relatedFaults.map((f) => ({
-            t: f.t,
-            label: f.eventId,
-            severity: f.severity,
-          })),
-          recoveries: relatedRecoveries.map((r) => ({
-            t: r.t,
-            label: r.recoveryId,
-            result: r.result,
-          })),
-        },
-      })),
-    };
-  });
-}
-
-function buildSignificantSpikeDetails(spikes, faultEvents, recoveryEvents) {
-  if (!(spikes || []).length) {
-    return {
-      rows: [],
-      emptyMessage:
-        "No significant threshold-related spikes detected in the selected historical reporting period.",
-    };
-  }
-  const rows = spikes.map((s, i) => {
-    const id = `SP-${String(i + 1).padStart(3, "0")}`;
-    const fault = (faultEvents || []).find(
-      (f) =>
-        matchComponent(f.component, s.component) &&
-        f.t &&
-        Math.abs(f.t - s.t) < 5 * 60 * 1000
-    );
-    const recovery = (recoveryEvents || []).find(
-      (r) =>
-        matchComponent(r.component, s.component) &&
-        r.t &&
-        Math.abs(r.t - s.t) < 30 * 60 * 1000
-    );
-    const baseline = s.before;
-    const increasePct =
-      baseline != null && baseline !== 0
-        ? (((s.peak - baseline) / Math.abs(baseline)) * 100).toFixed(1)
-        : "—";
-    return {
-      id,
-      timestamp: s.timestamp,
-      t: s.t,
-      component: s.component,
-      metric: s.metric,
-      baseline: baseline ?? "—",
-      peak: s.peak,
-      increasePct,
-      threshold: s.threshold,
-      duration: s.duration,
-      severity: s.severity,
-      unit: s.unit || "",
-      faultCorrelation: fault ? fault.eventId : "None",
-      recoveryCorrelation: recovery ? recovery.recoveryId : "None",
-      interpretation:
-        s.possibleCause ||
-        (fault
-          ? `Spike correlated with fault ${fault.eventId}.`
-          : `Short ${s.component} increase; ${
-              s.severity === "Warning" || s.severity === "Critical"
-                ? "threshold interaction observed"
-                : "remained within context of available telemetry"
-            }.`),
-    };
-  });
-  return { rows, emptyMessage: null };
-}
-
-function buildFaultDetailCards(faultEvents) {
-  return (faultEvents || []).map((f) => ({
-    eventId: f.eventId,
-    component: f.component,
-    severity: f.severity,
-    reason: f.faultReason,
-    detected: f.faultDetected,
-    peak: f.observedValue,
-    threshold: f.threshold,
-    corrected: f.correctedAt,
-    duration: f.duration,
-    recovery: f.recoveryAction || "None recorded",
-    recoveryId: f.recoveryId || "—",
-    result: f.finalStatus,
-    remarks: f.remarks || f.correlation || "—",
-    occurrences: 1,
-  }));
-}
-
-function buildFaultRecoveryChains(faultEvents, recoveryEvents) {
-  const chains = [];
-  (faultEvents || []).forEach((f) => {
-    if (!f.recoveryId) return;
-    const r = (recoveryEvents || []).find((x) => x.recoveryId === f.recoveryId);
-    if (!r) return;
-    chains.push({
-      faultId: f.eventId,
-      component: f.component,
-      steps: [
-        { stage: "Detection", detail: `${f.faultDetected}: ${f.faultReason}` },
-        { stage: "Severity", detail: f.severity },
-        { stage: "Recovery Action", detail: `${r.recoveryId} ${r.action} (PID ${r.pid})` },
-        { stage: "Verification", detail: r.verification || r.remarks || "—" },
-        { stage: "Final Status", detail: r.success ? "SUCCESS" : r.status },
-      ],
-    });
-  });
-  (recoveryEvents || []).forEach((r) => {
-    if (r.faultEventId) return;
-    chains.push({
-      faultId: null,
-      component: r.component,
-      steps: [
-        { stage: "Recovery Action", detail: `${r.recoveryId} ${r.action}` },
-        {
-          stage: "Correlation",
-          detail:
-            "Recovery action recorded without a corresponding fault event in the selected historical fault table.",
-        },
-        { stage: "Verification", detail: r.verification || "—" },
-        { stage: "Final Status", detail: r.success ? "SUCCESS" : r.status },
-      ],
-    });
-  });
-  return chains;
-}
-
-export function explainFault(fault) {
-  if (!fault) return "No fault details available.";
-  const parts = [];
-  if (fault.component) parts.push(`${fault.component}`);
-  if (fault.metricName) parts.push(`metric ${fault.metricName}`);
-  if (fault.currentValue != null) parts.push(`value ${fault.currentValue}`);
-  if (fault.thresholdCrossed) parts.push(`threshold ${fault.thresholdCrossed}`);
-  const base = fault.description || fault.message || "Fault recorded in historical database.";
-  return parts.length ? `${base} (${parts.join(", ")}).` : base;
-}
-
-export function recommendForFault(fault) {
-  if (!fault) {
-    return "Review historical telemetry and recovery history for affected components.";
-  }
-  const comp = String(fault.component || "").toLowerCase();
-  if (comp.includes("cpu")) {
-    return "Inspect top CPU consumers around the fault window and confirm recovery actions cleared the condition.";
-  }
-  if (comp.includes("gpu")) {
-    return "Review GPU utilization/temperature around the event and validate workload placement or thermal headroom.";
-  }
-  if (comp.includes("mem") || comp.includes("ram")) {
-    return "Check memory pressure and swap activity in the available window; identify processes retaining RAM.";
-  }
-  if (comp.includes("nic") || comp.includes("net")) {
-    return "Inspect NIC utilization, errors, and link state around the event; verify traffic spikes vs. link capacity.";
-  }
-  if (comp.includes("disk") || comp.includes("io") || comp.includes("storage")) {
-    return "Review disk busy, queue depth, and latency around the event; identify heavy I/O processes.";
-  }
-  return "Review historical telemetry and recovery history for this component.";
-}
-
-export function buildFaultAnalysis(faults) {
-  return (faults || []).map((f) => ({
-    ...f,
-    explanation: explainFault(f),
-    recommendation: recommendForFault(f),
-  }));
-}
-
-function buildRecommendations(samples, faultAnalysis, spikes, coverage, componentSections) {
-  const immediate = [];
-  const preventive = [];
-  const monitoring = [];
+function buildRecommendations(samples, faultAnalysis, coverage) {
+  const recs = [];
   const seen = new Set();
-  const add = (bucket, text) => {
+  const add = (text) => {
     if (!text || seen.has(text)) return;
     seen.add(text);
-    bucket.push(text);
+    recs.push(text);
   };
 
   if (coverage.empty) {
     add(
-      immediate,
-      "Ensure CM.py is persisting samples to telemetry_history.db, then regenerate the report. " +
-        "No historical telemetry was available for this period."
+      "No historical telemetry is available for this period. Ensure CM.py is running and " +
+        "persisting samples to telemetry_history.db, then regenerate the report."
     );
-    return { immediate, preventive, monitoring };
+    return recs;
   }
-
   if (coverage.incomplete) {
     add(
-      monitoring,
-      `Coverage is PARTIAL (${coverage.coveragePercent ?? "—"}%): available window is ` +
-        `${fmtDuration(coverage.availableSeconds)} of ${fmtDuration(coverage.requestedSeconds)} requested. ` +
-        "Do not treat missing days as healthy."
+      "Historical coverage is partial for the requested window. Earlier data was not present " +
+        "in SQLite (aged out or not yet collected). Do not treat missing days as healthy."
     );
   }
 
-  (faultAnalysis || [])
-    .filter((f) => !String(f.status || "").toLowerCase().includes("resolved"))
-    .slice(0, 8)
-    .forEach((f) => {
-      add(immediate, `[${f.component}] ${recommendForFault(f)}`);
-    });
+  faultAnalysis
+    .filter((f) => String(f.severity).toLowerCase() !== "resolved")
+    .forEach((f) => add(`[${f.component}] Review historical fault: ${f.description || f.message}`));
 
-  (componentSections || []).forEach((c) => {
-    if (c.status === "critical") {
-      add(
-        immediate,
-        `${c.name} peaked at ${c.stats?.max != null ? (c.name === "IO" ? `${fmtNum(c.stats.max)} MB/s` : fmtPct(c.stats.max)) : "—"}` +
-          `${c.peakAt ? ` (${c.peakAt})` : ""}; investigate and verify recovery.`
-      );
-    } else if (c.status === "warning") {
-      add(
-        preventive,
-        `${c.name} reached warning levels (peak ${c.stats?.max != null ? (c.name === "IO" ? `${fmtNum(c.stats.max)} MB/s` : fmtPct(c.stats.max)) : "—"}). ` +
-          "Schedule capacity/workload review before the next reporting window."
-      );
-    }
-  });
-
-  (spikes || []).slice(0, 5).forEach((s) => {
-    add(
-      preventive,
-      `${s.component} ${s.metric} spike to ${s.peak}${s.unit || ""} at ${s.timestamp} ` +
-        `(before ${s.before ?? "—"}, after ${s.after ?? "—"}, duration ${s.duration}).`
-    );
-  });
-
-  add(
-    monitoring,
-    `Continue SQLite retention monitoring: ${coverage.reportPointCount} report points / ` +
-      `${coverage.rawSampleCount} raw samples in this window.`
-  );
-
-  if (!immediate.length && !preventive.length) {
-    add(
-      monitoring,
-      "No critical or warning component peaks required immediate action in the available historical window."
-    );
+  const cpu = computeStats(samples.map((s) => s.cpu_usage));
+  if (cpu.max != null && cpu.max >= 90) {
+    add(`CPU usage peaked at ${cpu.max}% in historical telemetry. Investigate high-load processes.`);
+  }
+  const mem = computeStats(samples.map((s) => s.mem_usage));
+  if (mem.max != null && mem.max >= 90) {
+    add(`Memory usage reached ${mem.max}% in the available historical window.`);
   }
 
-  return { immediate, preventive, monitoring };
+  if (recs.length === 0) {
+    add("No significant performance concerns were identified in the available historical telemetry.");
+  }
+  return recs;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Public builders                                                            */
-/* -------------------------------------------------------------------------- */
+function buildFaultDistribution(faults) {
+  const bySeverity = { Critical: 0, Warning: 0, Resolved: 0 };
+  const byComponent = {};
+  faults.forEach((f) => {
+    const sev = f.severity || "Warning";
+    bySeverity[sev] = (bySeverity[sev] || 0) + 1;
+    byComponent[f.component] = (byComponent[f.component] || 0) + 1;
+  });
+  return { bySeverity, byComponent };
+}
 
 /**
- * Transform SQLite /reports/data payload into the report document model.
+ * Transform SQLite /reports/data payload into report document model.
  */
 export function buildReportDataFromHistory(apiPayload, config = {}) {
   const {
@@ -1630,216 +815,87 @@ export function buildReportDataFromHistory(apiPayload, config = {}) {
     generatedBy = "",
     description = "",
     sections = null,
-  } = typeof config === "string" ? { intervalKey: config } : config || {};
+  } = typeof config === "string" ? { intervalKey: config } : config;
 
   const api = apiPayload || {};
-  const samples = (api.telemetry || [])
-    .map(mapTelemetrySample)
-    .filter((s) => s && s.t != null);
-  const faults = (api.faults || []).map(mapFault).filter(Boolean);
-  const recoveryHistory = (api.recovery_history || []).map(mapRecovery).filter(Boolean);
-  const digitalTwinRows = (api.digital_twin_simulations || []).map(mapDigitalTwin).filter(Boolean);
-
-  const coverage = buildCoverageSection(api, samples, intervalKey, customRange);
+  const samples = (api.telemetry || []).map(mapTelemetrySample).filter((s) => s.t != null);
+  const faults = (api.faults || []).map(mapFault);
+  const recoveryHistory = (api.recovery_history || []).map(mapRecovery);
+  const digitalTwin = (api.digital_twin_simulations || []).map(mapDigitalTwin);
+  const coverage = buildCoverageSection(api, intervalKey, customRange);
   const gaps = detectGaps(samples, api.bucket_seconds || 60);
   const spikes = buildSpikeAnalysis(samples, faults);
-  const faultAnalysis = buildFaultAnalysis(faults);
-  const { faultEvents, recoveryEvents } = buildCorrelatedLogs(faults, recoveryHistory);
-  let componentSections = buildComponentSections(
-    samples,
-    faults,
-    spikes,
-    recoveryHistory
-  );
-  componentSections = enrichChartsWithMarkers(componentSections, faultEvents, recoveryEvents);
-  const componentOverview = buildComponentOverview(componentSections);
-  const logbook = buildLogbook(faults);
-  const faultIncidentLog = {
-    rows: faultEvents,
-    emptyMessage:
-      faultEvents.length === 0
-        ? "NO FAULT EVENTS RECORDED. No warning or critical fault events were recorded in the selected historical reporting period."
-        : null,
-  };
-  const recoveryActionLog = {
-    rows: recoveryEvents,
-    emptyMessage:
-      recoveryEvents.length === 0
-        ? "No recovery actions recorded during the selected historical reporting period."
-        : null,
-  };
-  const infrastructureTimeline = buildInfrastructureTimeline(
-    faultEvents,
-    recoveryEvents,
-    spikes
-  );
-  const activitySummary = buildActivitySummary(
-    faultEvents,
-    recoveryEvents,
-    spikes,
-    digitalTwinRows,
-    samples
-  );
-  const systemResourceTrend = buildSystemResourceTrend(samples);
-  const eventMarkers = buildEventMarkerSeries(faultEvents, recoveryEvents);
-  const significantEvents = buildSignificantSpikeDetails(
-    spikes,
-    faultEvents,
-    recoveryEvents
-  );
-  const faultDetailCards = buildFaultDetailCards(faultEvents);
-  const faultRecoveryChains = buildFaultRecoveryChains(faultEvents, recoveryEvents);
+  const faultAnalysis = faults.map((f) => ({
+    ...f,
+    explanation: f.description || f.message || "Fault recorded in historical database.",
+    recommendation: "Review historical telemetry and recovery history for this component.",
+  }));
+  const visualAnalysis = buildVisualAnalysis(samples, faults, spikes);
+  const trendSeries = buildTrendSeries(samples);
+  const overallHealthGraph = buildOverallHealthGraph(samples);
+  const interval = REPORT_INTERVALS[intervalKey];
+  const intervalLabel =
+    intervalKey === "custom" && customRange?.start && customRange?.end
+      ? `${formatLocal(customRange.start / 1000)} – ${formatLocal(customRange.end / 1000)}`
+      : interval?.label || intervalKey;
 
   const hostname =
     samples.find((s) => s.hostname)?.hostname ||
     api.databaseStats?.hostname ||
     null;
 
-  const interval = REPORT_INTERVALS[intervalKey];
-  const intervalLabel =
-    intervalKey === "custom" && customRange?.start && customRange?.end
-      ? `${fmtLocal(customRange.start)} – ${fmtLocal(customRange.end)}`
-      : interval?.label || intervalKey;
-
-  const generatedAt = new Date();
-  const reportId = `HMR-${generatedAt.getTime().toString(36).toUpperCase()}`;
-
-  const domainStart =
-    coverage.availableStart != null
-      ? coverage.availableStart
-      : samples[0]?.collected_at ?? null;
-  const domainEnd =
-    coverage.availableEnd != null
-      ? coverage.availableEnd
-      : samples[samples.length - 1]?.collected_at ?? null;
-
-  const graphs = {
-    byComponent: Object.fromEntries(
-      componentSections.map((c) => [c.name, c.charts || []])
-    ),
-    systemResourceTrend,
-    eventMarkers,
-    gaps,
-    domainStart,
-    domainEnd,
-    domainStartMs: domainStart != null ? domainStart * 1000 : null,
-    domainEndMs: domainEnd != null ? domainEnd * 1000 : null,
-    availableStart: domainStart,
-    availableEnd: domainEnd,
-    requestedStart: coverage.requestedStart,
-    requestedEnd: coverage.requestedEnd,
-    bucketSeconds: api.bucket_seconds || null,
-  };
-
-  const recommendations = buildRecommendations(
-    samples,
-    faultAnalysis,
-    spikes,
-    coverage,
-    componentSections
-  );
-
   const reportPeriod = {
     range: api.range || intervalKey,
-    label: intervalLabel,
     requestedStart: coverage.requestedStart,
     requestedEnd: coverage.requestedEnd,
     requestedStartIso: coverage.requestedStartIso,
     requestedEndIso: coverage.requestedEndIso,
+    label: intervalLabel,
+  };
+
+  const graphs = {
+    overallHealth: overallHealthGraph,
+    components: trendSeries,
+    gaps,
+    requestedStart: coverage.requestedStart,
+    requestedEnd: coverage.requestedEnd,
     availableStart: coverage.availableStart,
     availableEnd: coverage.availableEnd,
-    availableStartIso: coverage.availableStartIso,
-    availableEndIso: coverage.availableEndIso,
-  };
-
-  const reportMetadata = {
-    reportId,
-    title: title || "Infrastructure Health & Incident Report",
-    generatedAt,
-    generatedBy: generatedBy || "System Administrator",
-    description: description || "",
-    intervalKey,
-    intervalLabel,
-    dataSource: "SQLite telemetry_history.db via /reports/data",
-    database: api.database || null,
     bucketSeconds: api.bucket_seconds || null,
-    aggregated: Boolean(api.aggregated),
-  };
-
-  const digitalTwin = {
-    rows: digitalTwinRows,
-    emptyMessage:
-      digitalTwinRows.length === 0
-        ? "No Digital Twin simulations were recorded during this reporting period."
-        : null,
   };
 
   const reportData = {
-    ...reportMetadata,
-    reportMetadata,
-    reportId,
+    intervalKey,
+    intervalLabel,
+    generatedAt: new Date(),
+    title: title || "Infrastructure Health & Incident Report",
+    generatedBy: generatedBy || "System Administrator",
+    description,
+    dataSource: "SQLite telemetry_history.db via /reports/data",
     reportPeriod,
-    dataSource: reportMetadata.dataSource,
     dataCoverage: coverage,
     span: {
-      start: domainStart != null ? new Date(domainStart * 1000) : null,
-      end: domainEnd != null ? new Date(domainEnd * 1000) : null,
+      start: coverage.availableStart != null ? new Date(coverage.availableStart * 1000) : null,
+      end: coverage.availableEnd != null ? new Date(coverage.availableEnd * 1000) : null,
       label: coverage.coverageDurationLabel,
       requestedLabel: coverage.requestedLabel,
     },
-    executive: buildExecutiveSummary(
-      samples,
-      faults,
-      recoveryHistory,
-      coverage,
-      hostname
-    ),
-    componentSections,
-    componentOverview,
+    executive: buildExecutiveSummary(samples, faults, coverage, hostname),
+    inventory: null,
+    componentAnalysis: buildComponentAnalysis(samples, faults),
+    hardwareMetrics: buildHardwareMetrics(samples),
+    trendSeries,
+    graphs,
+    visualAnalysis,
     spikes,
-    significantEvents: significantEvents.rows,
-    significantEventsEmptyMessage: significantEvents.emptyMessage,
-    logbook: logbook.rows,
-    logbookEmptyMessage: logbook.emptyMessage,
-    faultEvents,
-    faultIncidentLog,
-    faultDetailCards,
-    recoveryEvents,
-    recoveryActionLog,
-    recoveryHistory: recoveryEvents,
-    faultRecoveryChains,
-    infrastructureTimeline,
-    activitySummary,
-    systemResourceTrend,
-    eventMarkers,
+    logbook: buildLogbook(faults),
     faults,
     faultAnalysis,
-    faultDistribution: (() => {
-      const bySeverity = { Critical: 0, Warning: 0, Resolved: 0 };
-      const byComponent = {};
-      faults.forEach((f) => {
-        const sev = f.severity || "Warning";
-        bySeverity[sev] = (bySeverity[sev] || 0) + 1;
-        byComponent[f.component] = (byComponent[f.component] || 0) + 1;
-      });
-      return { bySeverity, byComponent };
-    })(),
-    digitalTwin: digitalTwinRows,
-    digitalTwinEmptyMessage: digitalTwin.emptyMessage,
-    digitalTwinBlock: digitalTwin,
-    recommendations,
-    graphs,
-    gaps,
-    rawSamples: samples,
-    telemetry: samples,
-    context: { hostname, source: "sqlite" },
-    sampleCount: coverage.reportPointCount,
-    rawSampleCount: coverage.rawSampleCount,
-    reportPointCount: coverage.reportPointCount,
-    telemetryRawCount: coverage.rawSampleCount,
-    bucketSeconds: api.bucket_seconds || null,
-    database: api.database || null,
-    inventory: null,
+    faultDistribution: buildFaultDistribution(faults),
+    componentHealthSnapshot: buildComponentAnalysis(samples, faults).map((c) => ({
+      name: c.name,
+      level: c.level,
+    })),
     connectivityStatus: samples.length
       ? {
           linkHealth: {
@@ -1849,6 +905,12 @@ export function buildReportDataFromHistory(apiPayload, config = {}) {
           assessments: {},
         }
       : null,
+    recoveryHistory,
+    digitalTwin,
+    digitalTwinEmptyMessage:
+      digitalTwin.length === 0
+        ? "No Digital Twin simulations were recorded during this reporting period."
+        : null,
     aiRootCause: faultAnalysis.map((f) => ({
       component: f.component,
       severity: f.severity,
@@ -1857,65 +919,56 @@ export function buildReportDataFromHistory(apiPayload, config = {}) {
       recommendation: f.recommendation,
       timestamp: f.t,
     })),
-    // Transitional aliases for exporters still mid-migration
-    componentAnalysis: componentSections.map((c) => ({
-      name: c.name === "IO" ? "IO Control" : c.name,
-      level: c.status,
-      status: c.interpretation,
-      faults: c.faults || [],
-      liveMetrics: c.latestRecorded,
-      latestRecorded: c.latestRecorded,
-      inventory: [],
-      stats: c.stats,
-      charts: c.charts,
-      interpretation: c.interpretation,
-      warnCount: c.warnCount,
-      critCount: c.critCount,
-      peakAt: c.peakAt,
-      thresholds: c.thresholdLabel,
-    })),
-    componentHealthSnapshot: componentSections.map((c) => ({
-      name: c.name,
-      level: c.status,
-    })),
-    visualAnalysis: componentSections.map((c) => ({
-      component: c.name,
-      commentary: c.interpretation,
-      average: c.stats?.avg ?? null,
-      peak: c.stats?.max ?? null,
-      minimum: c.stats?.min ?? null,
-      warningEvents: c.warnCount || 0,
-      criticalEvents: c.critCount || 0,
-      peakAt: c.peakAt,
-    })),
-    trendSeries: componentSections.flatMap((c) =>
-      (c.charts || []).map((ch) => ({
-        key: ch.key,
-        label: ch.title,
-        suffix: ch.unit,
-        unit: ch.unit,
-        points: ch.points,
-        warning: ch.warning,
-        critical: ch.critical,
-        yMin: ch.yMin,
-        yMax: ch.yMax,
-        component: c.name,
-      }))
-    ),
-    hardwareMetrics: componentSections.flatMap((c) => {
-      if (!c.stats?.count) return [];
-      const unit = c.name === "IO" ? " MB/s" : "%";
-      return [
-        [
-          `${c.name} (primary)`,
-          c.stats.avg != null ? `${fmtNum(c.stats.avg)}${unit}` : "—",
-          c.stats.min != null ? `${fmtNum(c.stats.min)}${unit}` : "—",
-          c.stats.max != null ? `${fmtNum(c.stats.max)}${unit}` : "—",
-          c.stats.current != null ? `${fmtNum(c.stats.current)}${unit}` : "—",
-          c.stats.trend || "—",
-        ],
-      ];
-    }),
+    recommendations: buildRecommendations(samples, faultAnalysis, coverage),
+    predictiveMaintenance: (() => {
+      const predictiveWindowSec = 6 * 3600;
+      const predictiveAnchor =
+        samples.length > 0 ? samples[samples.length - 1].collected_at : null;
+      const predictiveSamples =
+        predictiveAnchor != null
+          ? samples.filter(
+              (s) =>
+                s.collected_at != null &&
+                s.collected_at >= predictiveAnchor - predictiveWindowSec
+            )
+          : [];
+      const predictiveRaw = buildPredictiveMaintenance(predictiveSamples, {
+        windowHours: 6,
+      });
+      return {
+        disclaimer: PREDICTIVE_DISCLAIMER,
+        generatedAt: predictiveRaw.generatedAt,
+        windowHours: predictiveRaw.windowHours,
+        sampleCount: predictiveRaw.sampleCount,
+        rows: (predictiveRaw.predictions || []).map((p) => ({
+          component: p.component,
+          metric: p.metric,
+          current:
+            p.currentValue != null
+              ? `${Number(p.currentValue).toFixed(1)}${p.unit}`
+              : "—",
+          warning: `${p.warningThreshold}${p.unit}`,
+          critical: `${p.criticalThreshold}${p.unit}`,
+          trend: p.trendRateLabel || "—",
+          confidence: p.confidence || "—",
+          etaWarning: p.estimatedTimeToWarningLabel || "—",
+          etaCritical: p.estimatedTimeToCriticalLabel || "—",
+          risk: p.risk,
+          recommendation: p.hasPrediction
+            ? `Monitor ${p.metric}; trend projects toward threshold if conditions continue. Advisory only.`
+            : p.message || "No significant degradation trend detected",
+          explanation: p.explanation,
+        })),
+      };
+    })(),
+    rawSamples: samples,
+    telemetry: samples,
+    context: { hostname, source: "sqlite" },
+    sampleCount: samples.length,
+    telemetryRawCount: api.telemetry_raw_count ?? samples.length,
+    bucketSeconds: api.bucket_seconds || null,
+    database: api.database || null,
+    gaps,
   };
 
   if (sections) {
@@ -1932,4 +985,22 @@ export function buildReportDataFromHistory(apiPayload, config = {}) {
 export async function buildReportData(config = {}) {
   const apiPayload = await fetchHistoricalReportData(config);
   return buildReportDataFromHistory(apiPayload, config);
+}
+
+export { explainFault, recommendForFault };
+
+function explainFault(fault) {
+  return fault.description || fault.message || "Fault recorded in historical database.";
+}
+
+function recommendForFault() {
+  return "Review historical telemetry and recovery history for this component.";
+}
+
+export function buildFaultAnalysis(faults) {
+  return (faults || []).map((f) => ({
+    ...f,
+    explanation: explainFault(f),
+    recommendation: recommendForFault(f),
+  }));
 }

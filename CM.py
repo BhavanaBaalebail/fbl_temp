@@ -153,6 +153,22 @@ from flask_cors import CORS
 
 import telemetry_db
 
+try:
+    import fbl_utilities
+except Exception:  # noqa: BLE001
+    fbl_utilities = None  # type: ignore
+
+try:
+    import fbl_chatbot
+except Exception:  # noqa: BLE001
+    fbl_chatbot = None  # type: ignore
+
+try:
+    import fbl_whatsapp
+except Exception:  # noqa: BLE001
+    fbl_whatsapp = None  # type: ignore
+
+
 
 # --------------------------------------------------------------------------
 # Configuration & Logging
@@ -200,6 +216,8 @@ _state_lock = threading.Lock()
 LATEST_INVENTORY: dict[str, Any] = {}
 LATEST_METRICS: dict[str, Any] = {}
 LATEST_LINK_HEALTH: dict[str, Any] = {}
+# Lifetime CPU throttle sysfs counters — track delta between polls only.
+_LAST_CPU_THROTTLE_TOTAL: Optional[int] = None
 
 # Per-collection-cycle command cache so repeated identical subprocess calls
 # within a single collect_* pass (e.g. multiple callers needing `lscpu` or
@@ -4579,13 +4597,23 @@ def compute_health_summary(report: dict[str, Any]) -> dict[str, Any]:
         components_with_warnings += 1
         flag("cpu", True, "warning", "CPU corrected hardware errors detected")
 
+    global _LAST_CPU_THROTTLE_TOTAL
     total_throttle = (
         (cpu_health.get("thermal_throttling_total_core_count") or 0)
         + (cpu_health.get("thermal_throttling_total_package_count") or 0)
     )
-    if total_throttle > 0:
+    throttle_delta = 0
+    if _LAST_CPU_THROTTLE_TOTAL is not None:
+        throttle_delta = max(0, total_throttle - _LAST_CPU_THROTTLE_TOTAL)
+    _LAST_CPU_THROTTLE_TOTAL = total_throttle
+    if throttle_delta > 0:
         components_with_warnings += 1
-        flag("cpu", True, "warning", "CPU thermal throttling events recorded")
+        flag(
+            "cpu",
+            True,
+            "warning",
+            f"CPU thermal throttling active ({throttle_delta} new event(s) since last poll)",
+        )
 
     # --- NIC ---
     for nic in report.get("nic", []) or []:
@@ -4935,36 +4963,61 @@ def _recovery_always_supported():
 # situations, so they go straight to SIGKILL.
 
 def _recovery_force_kill(pid: int, action_label: str) -> dict[str, Any]:
+    """Send SIGTERM (`kill <pid>`), verify /proc, report honest success."""
     cmd = ["kill", str(pid)]
     cmd_str = f"kill {pid}"
     logger.info("recovery %s: sending %s", action_label, cmd_str)
 
-    if not Path(f"/proc/{pid}").is_dir():
+    state_before = _recovery_process_state(pid)
+    if state_before is None:
         msg = f"pid {pid} does not exist -- no process to kill"
         logger.warning("recovery %s: %s", action_label, msg)
         return {
-            "success": False, "message": msg, "command": cmd_str,
-            "stdout": "", "stderr": "no such process", "returncode": 1,
+            "success": False,
+            "message": msg,
+            "command": cmd_str,
+            "stdout": "",
+            "stderr": "no such process",
+            "returncode": 1,
+            "verified": False,
+            "verification": "process already gone before kill",
+            "process_state_before": None,
+            "process_state_after": None,
         }
 
     res = _recovery_run(cmd)
-    still_alive = Path(f"/proc/{pid}").is_dir()
+    time.sleep(0.2)
+    state_after = _recovery_process_state(pid)
+    still_alive = state_after is not None and state_after != "Z"
+    gone = not still_alive
     logger.info(
-        "recovery %s: pid=%s returncode=%s still_alive=%s",
-        action_label, pid, res.get("returncode"), still_alive,
+        "recovery %s: pid=%s returncode=%s still_alive=%s verified=%s",
+        action_label, pid, res.get("returncode"), still_alive, gone,
     )
 
+    res["process_state_before"] = state_before
+    res["process_state_after"] = state_after
+    res["verified"] = gone
     if still_alive:
         res["success"] = False
-        res["message"] = f"Process {pid} is still running after kill -9."
+        res["message"] = f"Process {pid} is still running after kill."
+        res["verification"] = f"pid {pid} still present (state={state_after!r})"
     elif res.get("returncode") == 0:
         res["success"] = True
-        res["message"] = f"Process {pid} force-killed (kill -9)."
+        res["message"] = f"Process {pid} terminated."
+        res["verification"] = f"pid {pid} confirmed terminated -- no longer in /proc"
     else:
-        res["success"] = False
+        res["success"] = gone
         res["message"] = (
             res.get("stderr")
-            or f"kill -9 failed for pid {pid} (exit {res.get('returncode')})"
+            or f"kill failed for pid {pid} (exit {res.get('returncode')})"
+            if not gone
+            else f"Process {pid} terminated."
+        )
+        res["verification"] = (
+            f"pid {pid} confirmed terminated -- no longer in /proc"
+            if gone
+            else f"pid {pid} still present (state={state_after!r})"
         )
     return res
 
@@ -5741,8 +5794,21 @@ def execute_recovery_action(action_key: str, raw_params: dict, confirmation: dic
 def run_recovery_action(action_key: str, params: dict, fault: Optional[dict], confirmation: dict) -> dict[str, Any]:
     """Full lifecycle: before metrics -> execute -> settle -> after metrics
     -> log -> structured response. This is what the /recovery/execute
-    route calls."""
+    route calls.
+
+    `success` means the *action* succeeded (signal delivered and process
+    state verified where applicable). It does NOT mean the original fault
+    has recovered — the UI/workflow must re-check telemetry for that.
+    """
     before_metrics = _safe_collect_metrics()
+
+    pid_raw = (params or {}).get("pid")
+    process_state_before = None
+    try:
+        if pid_raw is not None and str(pid_raw).strip() != "":
+            process_state_before = _recovery_process_state(int(pid_raw))
+    except (TypeError, ValueError):
+        process_state_before = None
 
     started = time.monotonic()
     result = execute_recovery_action(action_key, params, confirmation)
@@ -5752,19 +5818,78 @@ def run_recovery_action(action_key: str, params: dict, fault: Optional[dict], co
 
     after_metrics = _safe_collect_metrics()
 
+    process_state_after = result.get("process_state_after")
+    if process_state_after is None and pid_raw is not None:
+        try:
+            process_state_after = _recovery_process_state(int(pid_raw))
+        except (TypeError, ValueError):
+            process_state_after = None
+
+    # Prefer handler-provided process verification; fall back to presence check.
+    verified = result.get("verified")
+    verification = result.get("verification")
+    if verified is None and pid_raw is not None:
+        is_kill = action_key.endswith(("kill_process", "terminate_process"))
+        is_pause = action_key.endswith("pause_process")
+        is_resume = action_key.endswith("resume_process")
+        if is_kill:
+            verified = process_state_after is None or process_state_after == "Z"
+            verification = (
+                f"pid {pid_raw} confirmed terminated"
+                if verified
+                else f"pid {pid_raw} still present (state={process_state_after!r})"
+            )
+        elif is_pause:
+            verified = process_state_after == "T"
+            verification = f"pid {pid_raw} state={process_state_after}"
+        elif is_resume:
+            verified = process_state_after is not None and process_state_after != "T"
+            verification = f"pid {pid_raw} state={process_state_after}"
+
+    action_success = bool(result.get("success"))
+    if verified is False:
+        action_success = False
+    elif action_key.endswith(("kill_process", "terminate_process")) and verified is True:
+        action_success = True
+    # actionStatus is command/process verification only — never fault recovery.
+    action_status = "ACTION_SUCCESS" if action_success else "ACTION_FAILED"
+
     record_recovery_history(
         action=action_key, params=params or {}, fault=fault, confirmation=confirmation or {},
-        command=result.get("command", ""), success=bool(result.get("success")),
+        command=result.get("command", ""), success=action_success,
         message=result.get("message", ""), stdout=result.get("stdout", ""), stderr=result.get("stderr", ""),
         returncode=result.get("returncode"), before_metrics=before_metrics, after_metrics=after_metrics,
         duration_seconds=duration,
+        verified=verified,
+        verification=verification,
+        process_state_before=process_state_before if result.get("process_state_before") is None else result.get("process_state_before"),
+        process_state_after=process_state_after,
+        action_status=action_status,
+        # Fault-level recovery is determined by the frontend against live thresholds.
+        recovery_status=None,
     )
 
     return {
-        "success": bool(result.get("success")), "message": result.get("message", ""),
-        "command": result.get("command", ""), "output": result.get("stdout", ""),
-        "stderr": result.get("stderr", ""), "returncode": result.get("returncode"),
-        "beforeMetrics": before_metrics, "afterMetrics": after_metrics, "durationSeconds": duration,
+        "success": action_success,
+        "message": result.get("message", ""),
+        "command": result.get("command", ""),
+        "output": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "returncode": result.get("returncode"),
+        "beforeMetrics": before_metrics,
+        "afterMetrics": after_metrics,
+        "durationSeconds": duration,
+        "verified": verified,
+        "verification": verification,
+        "processStateBefore": (
+            process_state_before
+            if result.get("process_state_before") is None
+            else result.get("process_state_before")
+        ),
+        "processStateAfter": process_state_after,
+        "actionStatus": action_status,
+        # Explicitly not RECOVERED — callers must verify the fault condition.
+        "recoveryStatus": None,
     }
 
 
@@ -5899,7 +6024,19 @@ def updater_loop() -> None:
                     db_metrics = LATEST_METRICS
                     db_inventory = LATEST_INVENTORY
                     db_link_health = LATEST_LINK_HEALTH
-                telemetry_db.persist_poll_cycle(db_metrics, db_inventory, db_link_health)
+                poll_result = telemetry_db.persist_poll_cycle(
+                    db_metrics, db_inventory, db_link_health
+                )
+                if fbl_whatsapp is not None and isinstance(poll_result, dict):
+                    try:
+                        fbl_whatsapp.handle_poll_critical_faults(
+                            poll_result.get("critical_faults") or [],
+                            hostname=poll_result.get("hostname"),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "WhatsApp notification hook failed (telemetry unaffected)"
+                        )
             except Exception:
                 logger.exception("Failed to persist telemetry poll cycle to database")
 
@@ -5915,6 +6052,49 @@ def updater_loop() -> None:
 
 app = Flask(__name__)
 CORS(app)
+
+# On-demand FBL utilities (safe collectors; reuse LATEST_* caches where possible)
+if fbl_utilities is not None:
+    def _utilities_latest():
+        with _state_lock:
+            return (
+                dict(LATEST_METRICS or {}),
+                dict(LATEST_INVENTORY or {}),
+                dict(LATEST_LINK_HEALTH or {}),
+            )
+
+    try:
+        fbl_utilities.register_utilities_routes(app, get_latest=_utilities_latest)
+    except Exception:
+        logger.exception("Failed to register FBL utilities routes")
+
+if fbl_chatbot is not None:
+    def _chatbot_latest():
+        with _state_lock:
+            return (
+                dict(LATEST_METRICS or {}),
+                dict(LATEST_INVENTORY or {}),
+                dict(LATEST_LINK_HEALTH or {}),
+            )
+
+    try:
+        fbl_chatbot.register_chatbot_routes(app, get_latest=_chatbot_latest)
+    except Exception:
+        logger.exception("Failed to register FBL chatbot routes")
+
+if fbl_whatsapp is not None:
+    def _whatsapp_latest():
+        with _state_lock:
+            return (
+                dict(LATEST_METRICS or {}),
+                dict(LATEST_INVENTORY or {}),
+                dict(LATEST_LINK_HEALTH or {}),
+            )
+
+    try:
+        fbl_whatsapp.register_whatsapp_routes(app, get_latest=_whatsapp_latest)
+    except Exception:
+        logger.exception("Failed to register FBL WhatsApp notification routes")
 
 
 @app.route("/inventory")
@@ -6456,6 +6636,27 @@ def db_digital_twin_history_endpoint():
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to query digital twin history from database")
+        return jsonify({"error": str(exc), "history": [], "count": 0}), 500
+    return jsonify({"history": history, "count": len(history)})
+
+
+@app.route("/db/utility_history")
+def db_utility_history_endpoint():
+    start = request.args.get("start")
+    end = request.args.get("end")
+    range_key = request.args.get("range")
+    utility_id = request.args.get("utility_id")
+    limit = request.args.get("limit", default=5000, type=int)
+    try:
+        history = telemetry_db.query_utility_history(
+            start=start,
+            end=end,
+            range_key=range_key,
+            utility_id=utility_id,
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to query utility history from database")
         return jsonify({"error": str(exc), "history": [], "count": 0}), 500
     return jsonify({"history": history, "count": len(history)})
 

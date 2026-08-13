@@ -10,11 +10,11 @@ import { MetricCard } from "./components/dashboard/MetricCard";
 import { SeverityChart } from "./components/dashboard/SeverityChart";
 import { ComponentHealthStatus } from "./components/dashboard/ComponentHealth";
 import { DashboardRecoverableFaults } from "./components/dashboard/DashboardRecoverableFaults";
-import { DashboardUtilities } from "./components/dashboard/DashboardUtilities";
-import { useDashboardUtilities } from "./hooks/useDashboardUtilities";
+import { PredictiveMaintenancePanel } from "./components/dashboard/PredictiveMaintenancePanel";
 import { FaultDetectionTab } from "./components/faults/FaultDetection";
 import { FaultModal } from "./components/faults/FaultModal";
 import { ReportsPage } from "./components/reports/ReportsPage";
+import { UtilitiesPage } from "./utilities/pages/UtilitiesPage";
 import { TopologyCanvas } from "./components/connectivity/TopologyCanvas";
 import { ChatWidget } from "./components/chatbot/ChatWidget";
 import { PcbBackground } from "./components/ui/PcbBackground";
@@ -31,8 +31,9 @@ import {
 import { useTelemetry } from "./hooks/useTelemetry";
 import { useTopology } from "./hooks/useTopology";
 import { useFaults } from "./hooks/useFaults";
+import { useWhatsAppCriticalAlerts } from "./hooks/useWhatsAppCriticalAlerts";
 
-const tabs = ["Dashboard", "Connectivity", "Fault Detection", "Reports"];
+const tabs = ["Dashboard", "Connectivity", "Fault Detection", "Utilities", "Reports"];
 
 function Dashboard({
   metrics,
@@ -47,26 +48,12 @@ function Dashboard({
   linkHealthSummary,
   faults,
   onViewFault,
-  rawMetrics,
-  rawLinkHealth,
-  rawInventory,
-  onOpenReports,
 }) {
   const updatedLabel = lastUpdated
     ? lastUpdated.toLocaleTimeString()
     : loading
       ? "Loading…"
       : "—";
-
-  const { utilities, summary } = useDashboardUtilities({
-    enabled: true,
-    connected,
-    rawMetrics,
-    rawLinkHealth,
-    rawInventory,
-    faults,
-    linkHealthSummary,
-  });
 
   return (
     <div className="relative space-y-5">
@@ -108,14 +95,6 @@ function Dashboard({
             Last sync: {updatedLabel}
             {error ? ` · ${error}` : ""}
           </p>
-          <a
-            href="http://localhost:8000/"
-            target="_blank"
-            rel="noreferrer"
-            className="text-xs font-medium text-[#38bdf8] transition-colors hover:text-[#22d3ee]"
-          >
-            Open Hardware Monitor ↗
-          </a>
         </div>
       </header>
 
@@ -135,17 +114,14 @@ function Dashboard({
 
       <BusConnector />
 
+      <PredictiveMaintenancePanel enabled={connected} />
+
+      <BusConnector />
+
       <section className="grid grid-cols-1 gap-5 xl:grid-cols-2">
         <SeverityChart data={severity} />
         <ComponentHealthStatus healthRows={health} stats={stats} />
       </section>
-
-      <DashboardUtilities
-        utilities={utilities}
-        summary={summary}
-        connected={connected}
-        onOpenReports={onOpenReports}
-      />
     </div>
   );
 }
@@ -237,13 +213,16 @@ function App() {
   const topology = useTopology(telemetry.topologyContext);
   const faults = useFaults(telemetry.faults);
 
+  useWhatsAppCriticalAlerts(faults.faults, {
+    hostname: telemetry.hostname,
+    enabled: telemetry.connected,
+  });
+
   const handleRecoveryComplete = () => {
     telemetry.refreshNow();
   };
 
-  const dashboardFaultRow = dashboardFaultModal
-    ? faults.faults?.find((f) => f.id === dashboardFaultModal.id) || dashboardFaultModal
-    : null;
+  const dashboardFaultRow = dashboardFaultModal;
 
   const dashboard = {
     metrics: telemetry.metrics,
@@ -257,11 +236,7 @@ function App() {
     error: telemetry.error,
     linkHealthSummary: telemetry.linkHealthSummary,
     faults: faults.faults,
-    rawMetrics: telemetry.rawMetrics,
-    rawLinkHealth: telemetry.rawLinkHealth,
-    rawInventory: telemetry.rawInventory,
     onViewFault: (fault) => setDashboardFaultModal(fault),
-    onOpenReports: () => setActiveTab("Reports"),
   };
 
   return (
@@ -284,8 +259,8 @@ function App() {
 
           <main
             className={`relative flex-1 ${
-              activeTab === "Reports"
-                ? "flex min-h-0 flex-col overflow-hidden p-4 lg:p-5"
+              activeTab === "Reports" || activeTab === "Utilities"
+                ? "flex min-h-0 flex-col overflow-hidden p-0"
                 : activeTab === "Fault Detection"
                   ? "overflow-auto px-5 pb-5 pt-3"
                   : "overflow-auto p-6 lg:p-8"
@@ -315,8 +290,13 @@ function App() {
                 onRecoveryComplete={handleRecoveryComplete}
               />
             )}
+            {activeTab === "Utilities" && (
+              <UtilitiesPage onOpenReports={() => setActiveTab("Reports")} />
+            )}
             {activeTab === "Reports" && (
-              <ReportsPage connected={telemetry.connected} loading={telemetry.loading} />
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4 lg:p-5">
+                <ReportsPage connected={telemetry.connected} loading={telemetry.loading} />
+              </div>
             )}
           </main>
         </div>

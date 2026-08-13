@@ -247,25 +247,6 @@ export function exportReportCsv(reportData) {
     lines.push("");
   }
 
-  if (reportData.digitalTwin?.length) {
-    lines.push("Digital Twin Simulations");
-    lines.push(
-      rowsToCsv([
-        ["timestamp", "component", "action", "risk", "confidence", "approved", "executed", "result"],
-        ...reportData.digitalTwin.map((s) => [
-          s.timestamp,
-          s.component,
-          s.action,
-          s.risk,
-          s.confidence,
-          s.approved,
-          s.executed,
-          s.result,
-        ]),
-      ])
-    );
-  }
-
   const csv = lines.join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);

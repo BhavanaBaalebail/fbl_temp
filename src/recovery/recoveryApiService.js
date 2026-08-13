@@ -75,11 +75,13 @@ export async function executeRecoveryAction(payload) {
       action: payload.action,
       pid,
       success: body.success,
+      verified: body.verified,
       command: body.command,
       returncode: body.returncode,
       stdout: body.stdout,
       stderr: body.stderr,
       message: body.message,
+      verification: body.verification,
     });
   }
 

@@ -101,6 +101,18 @@ export const RECOMMENDATION_CATALOG = [
     actionIds: ["disk.pause_process", "disk.resume_process", "disk.terminate_process"],
   },
   {
+    id: "io-workload",
+    label: "I/O Workload Recovery",
+    // Match workload IDs only (before io-pcie). Use disk.* actions — already
+    // registered on CM.py /recovery/capabilities (SIGSTOP/CONT/TERM).
+    match: (f) =>
+      f.id?.startsWith("threshold-io-busy-") ||
+      f.id?.startsWith("threshold-io-queue-") ||
+      f.id?.startsWith("threshold-io-latency-") ||
+      f.id?.startsWith("threshold-io-throughput-"),
+    actionIds: ["disk.pause_process", "disk.resume_process", "disk.terminate_process"],
+  },
+  {
     id: "disk-workload",
     label: "Disk Workload Recovery",
     match: (f) =>

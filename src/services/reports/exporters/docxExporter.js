@@ -299,6 +299,54 @@ export async function exportReportDocx(reportData) {
     }
   }
 
+  if (sectionEnabled(reportData, "predictiveMaintenance") && reportData.predictiveMaintenance) {
+    const pm = reportData.predictiveMaintenance;
+    children.push(heading("6b. Predictive Maintenance", HeadingLevel.HEADING_1));
+    children.push(
+      body(
+        pm.disclaimer ||
+          "Predictive Maintenance estimates when a monitored metric may cross an operational threshold if the current trend continues. It does not predict exact hardware failure or guarantee future system behavior."
+      )
+    );
+    children.push(
+      body(
+        `Analysis window: last ~${pm.windowHours || 6} hours (${pm.sampleCount || 0} SQLite samples). Risk is derived from current value, threshold distance, OLS trend, and confidence. Advisory only — not used for automatic recovery.`
+      )
+    );
+    if ((pm.rows || []).length) {
+      children.push(
+        simpleTable(
+          [
+            "Metric",
+            "Current",
+            "Warning",
+            "Critical",
+            "Trend",
+            "Est. warning",
+            "Est. critical",
+            "Confidence",
+            "Risk",
+            "Recommendation",
+          ],
+          pm.rows.map((r) => [
+            r.metric,
+            r.current,
+            r.warning,
+            r.critical,
+            r.trend,
+            r.etaWarning,
+            r.etaCritical,
+            r.confidence,
+            r.risk,
+            r.recommendation,
+          ])
+        )
+      );
+    } else {
+      children.push(body("No predictive rows available for this period."));
+    }
+  }
+
   if (sectionEnabled(reportData, "faultTimeline")) {
     children.push(heading("7. Fault & Incident Log", HeadingLevel.HEADING_1));
     if (!(reportData.faultEvents || []).length) {
@@ -477,36 +525,8 @@ export async function exportReportDocx(reportData) {
     );
   }
 
-  if (sectionEnabled(reportData, "digitalTwin")) {
-    children.push(heading("12. Digital Twin History", HeadingLevel.HEADING_1));
-    if (!reportData.digitalTwin?.length) {
-      children.push(
-        body(
-          reportData.digitalTwinEmptyMessage ||
-            "No Digital Twin simulations recorded."
-        )
-      );
-    } else {
-      children.push(
-        simpleTable(
-          ["Time", "Component", "Action", "Risk", "Confidence", "Approved", "Executed", "Result"],
-          reportData.digitalTwin.map((s) => [
-            s.timestamp,
-            s.component,
-            s.action,
-            s.risk,
-            s.confidence,
-            s.approved ? "yes" : "no",
-            s.executed ? "yes" : "no",
-            s.result,
-          ])
-        )
-      );
-    }
-  }
-
   if (sectionEnabled(reportData, "recommendations")) {
-    children.push(heading("13. Recommendations", HeadingLevel.HEADING_1));
+    children.push(heading("12. Recommendations", HeadingLevel.HEADING_1));
     const rec = reportData.recommendations;
     if (rec && !Array.isArray(rec)) {
       [
@@ -525,7 +545,7 @@ export async function exportReportDocx(reportData) {
   }
 
   if (sectionEnabled(reportData, "rawTelemetry")) {
-    children.push(heading("14. Appendix / Report Metadata", HeadingLevel.HEADING_1));
+    children.push(heading("13. Appendix / Report Metadata", HeadingLevel.HEADING_1));
     children.push(body(`Data source: ${reportData.dataSource || "-"}`));
     children.push(body(`Raw samples: ${raw} | Report points: ${points}`));
     children.push(

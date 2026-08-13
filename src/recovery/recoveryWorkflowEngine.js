@@ -102,9 +102,9 @@ function metricsSnapshotFromBackend(backendMetrics, linkHealth) {
 }
 
 export async function analyzeRecovery(fault) {
-  let inventory = {};
-  let metrics = {};
-  let linkHealth = {};
+  let inventory;
+  let metrics;
+  let linkHealth;
   const capabilities = await fetchRecoveryCapabilities();
 
   try {
@@ -118,7 +118,13 @@ export async function analyzeRecovery(fault) {
     };
   }
 
-  const analysis = buildRecoveryAnalysis(fault, inventory, metrics, linkHealth, capabilities);
+  const analysis = buildRecoveryAnalysis(
+    fault,
+    inventory || {},
+    metrics || {},
+    linkHealth || {},
+    capabilities
+  );
   const timeline = [
     createTimelineEvent("fault_detected", `${fault.component} fault under analysis`),
     createTimelineEvent(
@@ -242,8 +248,21 @@ export async function executeApprovedRecovery(fault, recommendation, confirmatio
         .join("\n") || null
     );
 
-    if (!commandResult.success) {
-      throw new Error(commandResult.message || commandResult.stderr || "Recovery command failed on host.");
+    const processVerified =
+      commandResult.verified === true ||
+      (commandResult.verified == null && commandResult.success === true);
+    const actionOk =
+      Boolean(commandResult.success) &&
+      processVerified &&
+      commandResult.verified !== false;
+
+    if (!actionOk) {
+      throw new Error(
+        commandResult.verification ||
+          commandResult.message ||
+          commandResult.stderr ||
+          "Recovery command failed on host — process was not terminated."
+      );
     }
 
     beforeSnapshot =

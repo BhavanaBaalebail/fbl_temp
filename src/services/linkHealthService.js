@@ -69,8 +69,8 @@ export const IO_QUEUE_THRESHOLDS = {
 };
 
 export const IO_LATENCY_THRESHOLDS = {
-  warningMin: 5, // ms — TESTING/DEMO — production often ~20
-  criticalMin: 20, // ms — TESTING/DEMO — production often ~100
+  warningMin: 20, // ms — industry-standard sustained I/O latency warning
+  criticalMin: 100, // ms — industry-standard critical I/O latency
 };
 
 export const IO_THROUGHPUT_THRESHOLDS = {
@@ -100,6 +100,34 @@ function ioThroughputThresholdLabel(severity) {
   return severity === "Critical"
     ? `≥ ${IO_THROUGHPUT_THRESHOLDS.criticalMin} MB/s (Critical)`
     : `≥ ${IO_THROUGHPUT_THRESHOLDS.warningMin} MB/s (Warning)`;
+}
+
+/**
+ * CPU thermal_throttle sysfs counters are lifetime totals (often millions on
+ * busy hosts). Call syncCpuThrottlePoll once per telemetry poll, then read delta.
+ */
+let _lastCpuThrottleTotal = null;
+let _pollThrottleDelta = 0;
+
+function cpuThrottleLifetimeTotal(cpuHealth) {
+  const h = cpuHealth || {};
+  return (
+    (h.thermal_throttling_total_core_count || 0) +
+    (h.thermal_throttling_total_package_count || 0)
+  );
+}
+
+export function syncCpuThrottlePoll(linkHealth) {
+  const cpuH = (linkHealth?.cpu || {}).health || {};
+  const total = cpuThrottleLifetimeTotal(cpuH);
+  const prev = _lastCpuThrottleTotal;
+  _lastCpuThrottleTotal = total;
+  _pollThrottleDelta = prev == null ? 0 : Math.max(0, total - prev);
+  return _pollThrottleDelta;
+}
+
+export function getCpuThrottlePollDelta() {
+  return _pollThrottleDelta;
 }
 
 function ioBusyLevel(busyPct) {
@@ -733,11 +761,9 @@ function sectionStatus(key, lh) {
     }
     case "cpu": {
       const h = data.health || {};
-      const throttle =
-        (h.thermal_throttling_total_core_count || 0) +
-        (h.thermal_throttling_total_package_count || 0);
+      const throttleDelta = getCpuThrottlePollDelta();
       if ((h.fatal_errors || 0) > 0) return "critical";
-      if ((h.corrected_errors || 0) > 0 || throttle > 0) return "warning";
+      if ((h.corrected_errors || 0) > 0 || throttleDelta > 0) return "warning";
       return "healthy";
     }
     case "memory": {
@@ -857,9 +883,7 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
   // CPU
   const cpuLh = lh.cpu || {};
   const cpuH = cpuLh.health || {};
-  const cpuThrottle =
-    (cpuH.thermal_throttling_total_core_count || 0) +
-    (cpuH.thermal_throttling_total_package_count || 0);
+  const cpuThrottleDelta = getCpuThrottlePollDelta();
   let cpuLevel = sectionStatus("cpu", lh);
   const cpuUtil = num(cpuM.usage_percent);
   const cpuTemp = num(cpuM.temperature_celsius);
@@ -877,7 +901,9 @@ export function assessLinkHealthComponents(linkHealth, inventory, metrics) {
   const cpuParts = [];
   if (cpuH.fatal_errors > 0) cpuParts.push(`${cpuH.fatal_errors} fatal error(s)`);
   if (cpuH.corrected_errors > 0) cpuParts.push(`${cpuH.corrected_errors} corrected error(s)`);
-  if (cpuThrottle > 0) cpuParts.push(`thermal throttle ×${cpuThrottle}`);
+  if (cpuThrottleDelta > 0) {
+    cpuParts.push(`${cpuThrottleDelta} new throttle event(s) this poll`);
+  }
   if (cpuUtil != null) {
     const utilHigh = cpuUtil >= CPU_UTIL_THRESHOLDS.warningMin ? "elevated" : "nominal";
     cpuParts.push(`${cpuUtil}% utilization (${utilHigh})`);
@@ -1410,9 +1436,7 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
   const nicEval = evaluateNicHealth(lh, metrics);
   const faults = [];
 
-  const cpuThrottle =
-    (cpuH.thermal_throttling_total_core_count || 0) +
-    (cpuH.thermal_throttling_total_package_count || 0);
+  const cpuThrottleDelta = getCpuThrottlePollDelta();
 
   if ((cpuH.fatal_errors || 0) > 0) {
     faults.push(
@@ -1440,16 +1464,16 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
       })
     );
   }
-  if (cpuThrottle > 0) {
+  if (cpuThrottleDelta > 0) {
     faults.push(
       thresholdFault({
         id: "threshold-cpu-thermal-throttle",
         severity: "Warning",
         component: "CPU",
         metricName: "Thermal Throttling",
-        currentValue: String(cpuThrottle),
-        thresholdCrossed: "≥ 1 throttle event (Warning)",
-        description: `CPU thermal throttling active (${cpuThrottle} event(s)).`,
+        currentValue: String(cpuThrottleDelta),
+        thresholdCrossed: "≥ 1 new throttle event since last poll (Warning)",
+        description: `CPU thermal throttling detected (${cpuThrottleDelta} new event(s) since last telemetry poll). Lifetime counter is not used for alerting.`,
       })
     );
   }
@@ -2246,10 +2270,10 @@ export function buildAnomalyCategories(linkHealth, inventory, metrics) {
       rows: [
         anomalyRow(
           "Thermal throttle",
-          cpuH.thermal_throttling_total_package_count > 0 ? "warning" : "healthy",
-          cpuH.thermal_throttling_total_package_count > 0
-            ? `Package throttle ×${cpuH.thermal_throttling_total_package_count}`
-            : "No throttling"
+          getCpuThrottlePollDelta() > 0 ? "warning" : "healthy",
+          getCpuThrottlePollDelta() > 0
+            ? `${getCpuThrottlePollDelta()} new event(s) this poll`
+            : "No recent throttling"
         ),
         anomalyRow(
           "Machine-check errors",

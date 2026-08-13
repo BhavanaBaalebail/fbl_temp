@@ -67,7 +67,6 @@ export function exportReportJson(reportData) {
     infrastructureTimeline: reportData.infrastructureTimeline || [],
     faultRecoveryChains: reportData.faultRecoveryChains || [],
     activitySummary: reportData.activitySummary || [],
-    digitalTwinEvents: reportData.digitalTwin || [],
     visualAnalysis: (reportData.componentSections || []).map((c) => ({
       component: c.name,
       commentary: c.interpretation,
@@ -77,6 +76,7 @@ export function exportReportJson(reportData) {
     })),
     spikes: reportData.spikes || [],
     recommendations: reportData.recommendations || {},
+    predictiveMaintenance: reportData.predictiveMaintenance || null,
     gaps: reportData.gaps || [],
   };
 

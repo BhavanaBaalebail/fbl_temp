@@ -100,6 +100,11 @@ const CONNECTION_PATHS = {
       ifaceSubtitle1: "GPUDirect RDMA",
       ifaceSubtitle2: "GDR Port",
     },
+    "I/O": {
+      ifaceLabel: "Block I/O Path",
+      ifaceSubtitle1: "Storage Queues",
+      ifaceSubtitle2: "NVMe / SATA",
+    },
     "IO Controller": {
       ifaceLabel: "PCIe Switch",
       ifaceSubtitle1: "Multi-GPU Fabric",
@@ -127,6 +132,11 @@ const CONNECTION_PATHS = {
       ifaceSubtitle1: "Packet Buffer Memory",
       ifaceSubtitle2: "RX/TX Descriptor Rings",
     },
+    "I/O": {
+      ifaceLabel: "Block I/O Path",
+      ifaceSubtitle1: "Storage Queues",
+      ifaceSubtitle2: "NVMe / SATA",
+    },
     "IO Controller": {
       ifaceLabel: "MMIO Mapping",
       ifaceSubtitle1: "Device Register Access",
@@ -153,6 +163,11 @@ const CONNECTION_PATHS = {
       ifaceLabel: "iSCSI / NFS / NVMeoF",
       ifaceSubtitle1: "Network Storage Proto",
       ifaceSubtitle2: "Port 3260 / 2049",
+    },
+    "I/O": {
+      ifaceLabel: "Block I/O Path",
+      ifaceSubtitle1: "Device Queues",
+      ifaceSubtitle2: "Busy / Latency / IOPS",
     },
     "IO Controller": {
       ifaceLabel: "SATA / SAS via PCH",

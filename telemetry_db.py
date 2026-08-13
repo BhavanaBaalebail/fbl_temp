@@ -196,6 +196,48 @@ CREATE TABLE IF NOT EXISTS digital_twin_simulations (
 );
 """
 
+UTILITY_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS utility_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    collected_at REAL NOT NULL,
+    utility_id TEXT NOT NULL,
+    category TEXT,
+    severity TEXT,
+    status TEXT,
+    summary TEXT,
+    target TEXT,
+    result TEXT,
+    success INTEGER,
+    payload TEXT NOT NULL
+);
+"""
+
+NOTIFICATION_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS notification_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fault_id TEXT NOT NULL,
+    notification_type TEXT NOT NULL,
+    recipient_masked TEXT,
+    timestamp REAL NOT NULL,
+    send_status TEXT NOT NULL,
+    provider TEXT,
+    provider_response TEXT,
+    error TEXT,
+    payload_summary TEXT,
+    hostname TEXT
+);
+"""
+
+NOTIFICATION_OPEN_ALERTS_DDL = """
+CREATE TABLE IF NOT EXISTS notification_open_alerts (
+    fault_id TEXT PRIMARY KEY,
+    first_alert_at REAL NOT NULL,
+    last_alert_at REAL NOT NULL,
+    snapshot_json TEXT
+);
+"""
+
 # Columns that may be missing on older DBs — added via ALTER TABLE.
 _TELEMETRY_EXTRA_COLUMNS = [
     ("timestamp", "TEXT"),
@@ -263,6 +305,9 @@ def init_db() -> None:
             conn.execute(FAULT_EVENTS_DDL)
             conn.execute(RECOVERY_EXECUTIONS_DDL)
             conn.execute(DIGITAL_TWIN_DDL)
+            conn.execute(UTILITY_EVENTS_DDL)
+            conn.execute(NOTIFICATION_EVENTS_DDL)
+            conn.execute(NOTIFICATION_OPEN_ALERTS_DDL)
 
             _ensure_columns(conn, "telemetry_samples", _TELEMETRY_EXTRA_COLUMNS)
             _ensure_columns(conn, "fault_events", _FAULT_EXTRA_COLUMNS)
@@ -311,6 +356,18 @@ def init_db() -> None:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_dt_component "
                 "ON digital_twin_simulations(component)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_utility_collected_at "
+                "ON utility_events(collected_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notification_timestamp "
+                "ON notification_events(timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notification_fault_id "
+                "ON notification_events(fault_id)"
             )
             conn.commit()
             _load_seen_fault_ids(conn)
@@ -578,7 +635,7 @@ def persist_poll_cycle(
     metrics: dict[str, Any],
     inventory: Optional[dict[str, Any]],
     link_health: Optional[dict[str, Any]],
-) -> None:
+) -> dict[str, Any]:
     """Insert one telemetry sample and upsert any active health-summary faults."""
     collected_at = time.time()
     row = _build_telemetry_row(metrics, inventory, link_health, collected_at)
@@ -665,6 +722,16 @@ def persist_poll_cycle(
             conn.close()
 
     maybe_cleanup()
+
+    critical_faults = [
+        f for f in fault_rows if str(f.get("severity") or "").lower() == "critical"
+    ]
+    return {
+        "hostname": row.get("hostname"),
+        "collected_at": collected_at,
+        "critical_faults": critical_faults,
+        "fault_count": len(fault_rows),
+    }
 
 
 def insert_recovery_execution(entry: dict[str, Any]) -> None:
@@ -827,6 +894,258 @@ def update_digital_twin_simulation(simulation_id: int, updates: dict[str, Any]) 
             )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Utility + WhatsApp notification audit
+# ---------------------------------------------------------------------------
+
+
+def insert_utility_event(entry: dict[str, Any]) -> Optional[int]:
+    payload = dict(entry)
+    collected_at = _num(payload.get("collected_at")) or time.time()
+    timestamp = payload.get("timestamp") or _utc_iso(collected_at)
+    with _db_lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO utility_events (
+                    timestamp, collected_at, utility_id, category, severity,
+                    status, summary, target, result, success, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    collected_at,
+                    payload.get("utility_id") or payload.get("utilityId") or "unknown",
+                    payload.get("category"),
+                    payload.get("severity"),
+                    payload.get("status"),
+                    payload.get("summary"),
+                    payload.get("target"),
+                    payload.get("result"),
+                    1 if payload.get("success") is True else (0 if payload.get("success") is False else None),
+                    json.dumps(payload, default=str),
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        except sqlite3.Error:
+            logger.exception("Failed to insert utility event")
+            return None
+        finally:
+            conn.close()
+
+
+def query_utility_history(
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    range_key: Optional[str] = None,
+    utility_id: Optional[str] = None,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    start_ts, end_ts, _key = resolve_time_window(start, end, range_key)
+    limit = max(1, min(int(limit or 5000), 50000))
+    clauses = ["1=1"]
+    params: list[Any] = []
+    if start_ts is not None:
+        clauses.append("collected_at >= ?")
+        params.append(start_ts)
+    if end_ts is not None:
+        clauses.append("collected_at <= ?")
+        params.append(end_ts)
+    if utility_id:
+        clauses.append("utility_id = ?")
+        params.append(utility_id)
+    params.append(limit)
+    with _db_lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM utility_events WHERE {' AND '.join(clauses)} "
+                f"ORDER BY collected_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+            out = []
+            for row in rows:
+                item = dict(row)
+                if item.get("payload"):
+                    try:
+                        item["payload"] = json.loads(item["payload"])
+                    except (TypeError, json.JSONDecodeError):
+                        pass
+                out.append(item)
+            return out
+        finally:
+            conn.close()
+
+
+def insert_notification_event(entry: dict[str, Any]) -> Optional[int]:
+    payload_summary = entry.get("payload_summary")
+    if isinstance(payload_summary, dict):
+        payload_summary = json.dumps(payload_summary, default=str)
+    with _db_lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO notification_events (
+                    fault_id, notification_type, recipient_masked, timestamp,
+                    send_status, provider, provider_response, error,
+                    payload_summary, hostname
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.get("fault_id"),
+                    entry.get("notification_type"),
+                    entry.get("recipient_masked"),
+                    float(entry.get("timestamp") or time.time()),
+                    entry.get("send_status"),
+                    entry.get("provider"),
+                    entry.get("provider_response"),
+                    entry.get("error"),
+                    payload_summary,
+                    entry.get("hostname"),
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        except sqlite3.Error:
+            logger.exception("Failed to insert notification event")
+            return None
+        finally:
+            conn.close()
+
+
+def get_open_notification_alert(fault_id: str) -> Optional[dict[str, Any]]:
+    with _db_lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT fault_id, first_alert_at, last_alert_at, snapshot_json "
+                "FROM notification_open_alerts WHERE fault_id = ?",
+                (fault_id,),
+            ).fetchone()
+            if not row:
+                return None
+            snapshot = {}
+            if row["snapshot_json"]:
+                try:
+                    snapshot = json.loads(row["snapshot_json"])
+                except (TypeError, json.JSONDecodeError):
+                    snapshot = {}
+            return {
+                "fault_id": row["fault_id"],
+                "first_alert_at": row["first_alert_at"],
+                "last_alert_at": row["last_alert_at"],
+                "snapshot": snapshot,
+            }
+        finally:
+            conn.close()
+
+
+def upsert_open_notification_alert(fault_id: str, snapshot: Optional[dict[str, Any]] = None) -> None:
+    now = time.time()
+    snap_json = json.dumps(snapshot or {}, default=str)
+    with _db_lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT first_alert_at FROM notification_open_alerts WHERE fault_id = ?",
+                (fault_id,),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE notification_open_alerts SET last_alert_at = ?, snapshot_json = ? WHERE fault_id = ?",
+                    (now, snap_json, fault_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO notification_open_alerts (fault_id, first_alert_at, last_alert_at, snapshot_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (fault_id, now, now, snap_json),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def clear_open_notification_alert(fault_id: str) -> None:
+    with _db_lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM notification_open_alerts WHERE fault_id = ?", (fault_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def list_open_notification_alert_ids() -> list[str]:
+    with _db_lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT fault_id FROM notification_open_alerts").fetchall()
+            return [r["fault_id"] for r in rows]
+        finally:
+            conn.close()
+
+
+def get_last_notification_event() -> Optional[dict[str, Any]]:
+    with _db_lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT fault_id, notification_type, recipient_masked, timestamp,
+                       send_status, provider, provider_response, error,
+                       payload_summary, hostname
+                FROM notification_events
+                WHERE send_status IN ('sent', 'failed', 'duplicate', 'disabled')
+                ORDER BY timestamp DESC LIMIT 1
+                """
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            if item.get("payload_summary"):
+                try:
+                    item["payload_summary"] = json.loads(item["payload_summary"])
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            return item
+        finally:
+            conn.close()
+
+
+def query_notification_events(limit: int = 20) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 20), 200))
+    with _db_lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT fault_id, notification_type, recipient_masked, timestamp,
+                       send_status, provider, provider_response, error,
+                       payload_summary, hostname
+                FROM notification_events ORDER BY timestamp DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            out = []
+            for row in rows:
+                item = dict(row)
+                if item.get("payload_summary"):
+                    try:
+                        item["payload_summary"] = json.loads(item["payload_summary"])
+                    except (TypeError, json.JSONDecodeError):
+                        pass
+                if item.get("provider_response"):
+                    item["provider_response"] = str(item["provider_response"])[:500]
+                out.append(item)
+            return out
         finally:
             conn.close()
 
@@ -1276,6 +1595,11 @@ def query_report_data(
         end=str(end_ts) if end_ts is not None else None,
         limit=limit,
     )
+    utility_events = query_utility_history(
+        start=str(start_ts) if start_ts is not None else None,
+        end=str(end_ts) if end_ts is not None else None,
+        limit=limit,
+    )
 
     db_stats = get_database_stats()
     coverage = _coverage_block(
@@ -1311,6 +1635,8 @@ def query_report_data(
         "recovery_count": len(recovery),
         "digital_twin_simulations": digital_twin,
         "digital_twin_count": len(digital_twin),
+        "utility_events": utility_events,
+        "utility_event_count": len(utility_events),
         "generated_at": _utc_iso(),
         "database": str(TELEMETRY_DB_PATH),
         "databaseStats": db_stats,
@@ -1327,6 +1653,9 @@ def get_database_stats() -> dict[str, Any]:
                 "fault_events",
                 "recovery_executions",
                 "digital_twin_simulations",
+                "utility_events",
+                "notification_events",
+                "notification_open_alerts",
             ):
                 count = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
                 stats[table] = {"count": count}

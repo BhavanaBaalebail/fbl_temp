@@ -11,11 +11,12 @@ import {
   buildTopologyContext,
   getLinkHealthSummary,
   getPrimaryGpu,
+  syncCpuThrottlePoll,
 } from "./linkHealthService";
 import { enrichMetricsGpu } from "./gpuMetricsSupplement";
 
 const LINUX_SERVER =
-  import.meta.env.VITE_LINUX_SERVER || "http://10.17.13.15:5000";
+  import.meta.env.VITE_LINUX_SERVER || "http://10.17.19.37:5000";
 
 const REFRESH_MS = 5000;
 
@@ -283,6 +284,7 @@ export function buildHealthStats(healthRows) {
 }
 
 export function buildTelemetrySnapshot(inventory, metrics, linkHealth) {
+  syncCpuThrottlePoll(linkHealth);
   const health = buildHealthRows(inventory, metrics, linkHealth);
   const anomalyCategories = buildAnomalyCategories(linkHealth, inventory, metrics);
   const faults = buildFaultLog(linkHealth, inventory, metrics);

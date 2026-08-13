@@ -15,7 +15,8 @@ import {
   processActionKeysForDomain,
   processCandidatesDomainForFault,
 } from "../../recovery/recoveryProcessDomain";
-import { recordRecoveryExecution } from "../../recovery/recoveryHistoryService";
+import { recordRecoveryExecution, RECOVERY_STATUS } from "../../recovery/recoveryHistoryService";
+import { StatusBadge } from "../ui/HardwareModule";
 import { RecoveryConfirmationDialog } from "./RecoveryConfirmationDialog";
 
 const PANEL = {
@@ -107,11 +108,12 @@ export function RecoveryProcessCandidates({
   const [executingPid, setExecutingPid] = useState(null);
   const [pending, setPending] = useState(null);
   const [actionMessage, setActionMessage] = useState(null);
+  const [actionStatus, setActionStatus] = useState(null);
 
   const refresh = useCallback(async () => {
     if (!connected) {
       setLoading(false);
-      return;
+      return null;
     }
     setLoading(true);
     setError(null);
@@ -119,10 +121,12 @@ export function RecoveryProcessCandidates({
       const data = await fetchProcessCandidates(domain, { minPercent, limit: 50 });
       setCandidates(data.candidates || []);
       setMeta(data);
+      return data;
     } catch (err) {
       setCandidates([]);
       setMeta(null);
       setError(err.message || "Failed to load process candidates");
+      return null;
     } finally {
       setLoading(false);
     }
@@ -140,15 +144,22 @@ export function RecoveryProcessCandidates({
 
   const runAction = async (recommendation) => {
     const selectedPid = recommendation.params?.pid;
+    const isKill =
+      recommendation.backendAction?.includes("kill") ||
+      recommendation.backendAction?.includes("terminate");
+
     console.info("[recovery] user process action", {
       action: recommendation.backendAction,
       pid: selectedPid,
       command: candidateCommandLine(
-        candidates.find((c) => c.pid === selectedPid) || { command: recommendation.target?.processName }
+        candidates.find((c) => c.pid === selectedPid) || {
+          command: recommendation.target?.processName,
+        }
       ),
     });
     setExecutingPid(selectedPid);
     setActionMessage(null);
+    setActionStatus(RECOVERY_STATUS.ACTION_EXECUTING);
     setPending(null);
     try {
       const result = await executeRecoveryAction({
@@ -168,16 +179,50 @@ export function RecoveryProcessCandidates({
           acknowledgedAt: new Date().toISOString(),
         },
       });
-      setActionMessage(
-        result.success
-          ? result.message || "Action completed."
-          : result.message || "Action failed on host."
+
+      let processVerified =
+        result.verified === true ||
+        (result.verified == null && result.success === true);
+      let actionOk = Boolean(result.success) && processVerified && result.verified !== false;
+      let detail =
+        result.verification ||
+        result.message ||
+        (actionOk ? "Process action completed on host." : "Process action failed on host.");
+
+      const refreshed = await refresh();
+      if (
+        isKill &&
+        actionOk &&
+        refreshed?.candidates?.some((c) => c.pid === selectedPid)
+      ) {
+        actionOk = false;
+        detail = `Process ${selectedPid} is still running on the host after kill.`;
+        processVerified = false;
+      }
+
+      setActionStatus(
+        actionOk ? RECOVERY_STATUS.ACTION_SUCCESS : RECOVERY_STATUS.ACTION_FAILED
       );
+      setActionMessage(
+        actionOk
+          ? `${detail}${result.command ? ` · ${result.command}` : ""}`
+          : detail
+      );
+
       recordRecoveryExecution({
         faultId: fault.id,
         component: fault.component,
         metricName: fault.metricName,
-        result: result.success ? "success" : "failed",
+        pid: selectedPid,
+        processName: recommendation.target?.processName,
+        action: recommendation.backendAction,
+        actionStatus: actionOk
+          ? RECOVERY_STATUS.ACTION_SUCCESS
+          : RECOVERY_STATUS.ACTION_FAILED,
+        recoveryStatus: actionOk
+          ? RECOVERY_STATUS.ACTION_SUCCESS
+          : RECOVERY_STATUS.RECOVERY_FAILED,
+        result: actionOk ? "success" : "failed",
         selectedAction: {
           actionId: recommendation.actionId,
           label: recommendation.label,
@@ -185,15 +230,25 @@ export function RecoveryProcessCandidates({
         },
         params: recommendation.params,
         confirmationGiven: true,
-        commandExecuted: recommendation.backendAction,
+        commandExecuted: result.command || recommendation.backendAction,
         commandOutput: result,
-        verificationOutcome: result.message || (result.success ? "Process action completed." : "Process action failed."),
-        reason: result.message || recommendation.impact,
+        processStateBefore: result.processStateBefore ?? null,
+        processStateAfter: result.processStateAfter ?? null,
+        processVerified: result.verified ?? processVerified,
+        verificationOutcome: detail,
+        reason: detail,
         timestamp: new Date().toISOString(),
       });
-      await refresh();
-      onActionComplete?.(result);
+
+      onActionComplete?.({
+        ...result,
+        success: actionOk,
+        actionSuccess: actionOk,
+        recovered: false,
+        message: detail,
+      });
     } catch (err) {
+      setActionStatus(RECOVERY_STATUS.ACTION_FAILED);
       setActionMessage(err.message || "Recovery request failed.");
     } finally {
       setExecutingPid(null);
@@ -488,6 +543,90 @@ export function RecoveryProcessCandidates({
             </tbody>
           </table>
         </div>
+      ) : domain === "io" ? (
+        <div className="hw-table-wrap overflow-x-auto">
+          <table className="hw-table min-w-full text-xs">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Process</th>
+                <th>User</th>
+                <th className="text-right">Read</th>
+                <th className="text-right">Write</th>
+                <th className="text-right">Total I/O</th>
+                <th className="text-right">CPU %</th>
+                <th className="text-right">Mem %</th>
+                <th className="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((row) => {
+                const busy = executingPid === row.pid;
+                const pauseDisabled = !row.recoverable || !pauseSupported || busy;
+                const resumeDisabled = !row.recoverable || !resumeSupported || busy;
+                const killDisabled = !row.recoverable || !killSupported || busy;
+                const tip = !row.recoverable ? row.reason || "Not recoverable" : undefined;
+                const processTitle = row.command && row.command !== row.process
+                  ? `${row.process || candidateCommandLine(row)}\n${row.command}`
+                  : candidateCommandLine(row);
+                return (
+                  <tr key={row.pid}>
+                    <td className="font-mono-metrics">{row.pid}</td>
+                    <td className="max-w-[200px] truncate" title={processTitle}>
+                      {row.process || candidateCommandLine(row)}
+                    </td>
+                    <td>{row.user || "—"}</td>
+                    <td className="text-right font-mono-metrics">
+                      {fmtMBps(row.read_MB_per_sec)} MB/s
+                    </td>
+                    <td className="text-right font-mono-metrics">
+                      {fmtMBps(row.write_MB_per_sec)} MB/s
+                    </td>
+                    <td className="text-right font-mono-metrics">
+                      {candidateUsageLabel(row, domain)}
+                    </td>
+                    <td className="text-right font-mono-metrics">{row.cpu_percent ?? "—"}</td>
+                    <td className="text-right font-mono-metrics">{row.memory_percent ?? "—"}</td>
+                    <td className="text-right">
+                      <div className="flex justify-end gap-1.5">
+                        <button
+                          type="button"
+                          className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                          disabled={pauseDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.pause, row)}
+                        >
+                          Pause
+                        </button>
+                        {actionKeys.resume && (
+                          <button
+                            type="button"
+                            className="hw-btn-filter px-2 py-1 text-[10px] disabled:opacity-40"
+                            disabled={resumeDisabled}
+                            title={tip}
+                            onClick={() => requestAction(actionKeys.resume, row)}
+                          >
+                            Resume
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded px-2 py-1 text-[10px] font-semibold text-white disabled:opacity-40"
+                          style={{ background: killDisabled ? "#475569" : "#b91c1c" }}
+                          disabled={killDisabled}
+                          title={tip}
+                          onClick={() => requestAction(actionKeys.kill, row)}
+                        >
+                          {terminateLabel}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : domain === "disk" ? (
         <div className="hw-table-wrap overflow-x-auto">
           <table className="hw-table min-w-full text-xs">
@@ -625,12 +764,30 @@ export function RecoveryProcessCandidates({
       )}
 
       {actionMessage && (
-        <p
-          className="mt-2 rounded-lg border px-3 py-2 text-xs"
-          style={{ background: PANEL.inner, borderColor: PANEL.border, color: "#94a3b8" }}
+        <div
+          className="mt-2 flex flex-wrap items-start gap-2 rounded-lg border px-3 py-2 text-xs"
+          style={{ background: PANEL.inner, borderColor: PANEL.border }}
         >
-          {actionMessage}
-        </p>
+          {actionStatus ? (
+            <StatusBadge
+              status={
+                actionStatus === RECOVERY_STATUS.RECOVERED
+                  ? "healthy"
+                  : actionStatus === RECOVERY_STATUS.VERIFYING ||
+                      actionStatus === RECOVERY_STATUS.ACTION_EXECUTING ||
+                      actionStatus === RECOVERY_STATUS.ACTION_SUCCESS
+                    ? "warning"
+                    : actionStatus === RECOVERY_STATUS.STILL_ACTIVE ||
+                        actionStatus === RECOVERY_STATUS.VERIFICATION_UNAVAILABLE
+                      ? "warning"
+                      : "critical"
+              }
+              label={String(actionStatus).replace(/_/g, " ")}
+              showDot={false}
+            />
+          ) : null}
+          <p className="min-w-0 flex-1 text-[#94a3b8]">{actionMessage}</p>
+        </div>
       )}
 
       {!capabilities?.available && connected && (

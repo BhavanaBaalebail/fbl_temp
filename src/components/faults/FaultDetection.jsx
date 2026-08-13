@@ -24,9 +24,8 @@ export function FaultDetectionTab({
 }) {
   const [activeFaultModal, setActiveFaultModal] = useState(null);
 
-  const liveFaultRow = activeFaultModal
-    ? faults.faults?.find((f) => f.id === activeFaultModal.id) || activeFaultModal
-    : null;
+  // Freeze the clicked row — do not swap in a new object every telemetry poll.
+  const openFault = activeFaultModal;
 
   const scanLabel = lastUpdated ? lastUpdated.toLocaleTimeString() : "—";
 
@@ -86,9 +85,9 @@ export function FaultDetectionTab({
         {linkHealthSummary?.score != null && ` · Score: ${linkHealthSummary.score}`}
       </div>
 
-      {liveFaultRow && (
+      {openFault ? (
         <FaultModal
-          fault={liveFaultRow}
+          fault={openFault}
           connected={connected}
           liveMetrics={liveMetrics}
           liveLinkHealth={liveLinkHealth}
@@ -96,7 +95,7 @@ export function FaultDetectionTab({
           onRecoveryComplete={onRecoveryComplete}
           onClose={() => setActiveFaultModal(null)}
         />
-      )}
+      ) : null}
     </div>
   );
 }
@@ -372,7 +371,19 @@ function FaultLogSection({
                       {row.faultDescription}
                     </td>
                     <td>
-                      <StatusBadge status={rowStatus} label={row.status} />
+                      <div className="space-y-1">
+                        <StatusBadge status={rowStatus} label={row.status} />
+                        {row.recoveryStatus && row.recoveryStatus !== "RECOVERED" ? (
+                          <p className="text-[10px] text-[#64748b]">
+                            {String(row.recoveryStatus).replace(/_/g, " ")}
+                          </p>
+                        ) : null}
+                        {row.recoveryNote ? (
+                          <p className="max-w-[12rem] text-[10px] leading-snug text-[#64748b]">
+                            {row.recoveryNote}
+                          </p>
+                        ) : null}
+                      </div>
                     </td>
                     <td>
                       <div className="flex flex-wrap items-center gap-2">

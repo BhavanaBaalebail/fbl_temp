@@ -9,6 +9,7 @@ const TAB_ICONS = {
   Dashboard: "dashboard",
   Connectivity: "connectivity",
   "Fault Detection": "fault",
+  Utilities: "diagnostics",
   Reports: "report",
 };
 

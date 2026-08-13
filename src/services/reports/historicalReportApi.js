@@ -85,9 +85,6 @@ export async function fetchHistoricalReportData(config = {}) {
     payload.recovery_history = Array.isArray(payload.recovery_history)
       ? payload.recovery_history
       : [];
-    payload.digital_twin_simulations = Array.isArray(payload.digital_twin_simulations)
-      ? payload.digital_twin_simulations
-      : [];
     if (!payload.dataCoverage && (payload.start != null || payload.range)) {
       payload.dataCoverage = {
         status: payload.telemetry.length ? "PARTIAL" : "EMPTY",
@@ -100,7 +97,6 @@ export async function fetchHistoricalReportData(config = {}) {
         reportPointCount: payload.telemetry_count ?? payload.telemetry.length,
         faultEventCount: payload.fault_count ?? payload.faults.length,
         recoveryEventCount: payload.recovery_count ?? payload.recovery_history.length,
-        digitalTwinCount: payload.digital_twin_count ?? payload.digital_twin_simulations.length,
       };
     }
     return payload;

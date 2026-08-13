@@ -912,7 +912,6 @@ export function exportReportPdf(reportData = {}) {
       ["Report Points", String(cov.reportPointCount ?? reportPoints)],
       ["Fault Events", String(cov.faultEventCount ?? (reportData.faults || []).length)],
       ["Recovery Events", String(cov.recoveryEventCount ?? (reportData.recoveryHistory || []).length)],
-      ["Digital Twin Records", String(cov.digitalTwinCount ?? (reportData.digitalTwin || []).length)],
     ];
     y = kvTable(doc, y, covPairs, pageTitle);
     if (cov.empty || cov.status === "EMPTY") {
@@ -1142,6 +1141,73 @@ export function exportReportPdf(reportData = {}) {
       });
       y += 2;
     }
+  }
+
+  // ═══ 6b. PREDICTIVE MAINTENANCE ═══
+  if (sectionOn(reportData, "predictiveMaintenance") && reportData.predictiveMaintenance) {
+    const pm = reportData.predictiveMaintenance;
+    y = ensureSpace(doc, y, 30, pageTitle);
+    y = sectionTitle(doc, "6b. Predictive Maintenance", y, pageTitle);
+    y = bodyText(
+      doc,
+      pm.disclaimer ||
+        "Predictive Maintenance estimates when a monitored metric may cross an operational threshold if the current trend continues. It does not predict exact hardware failure or guarantee future system behavior.",
+      y,
+      pageTitle,
+      { size: 8, style: "italic", color: GRAY }
+    );
+    y += 2;
+    y = bodyText(
+      doc,
+      `Analysis window: last ~${pm.windowHours || 6} hours of SQLite samples (${pm.sampleCount || 0} points). Risk is derived from current value, threshold distance, OLS trend, and confidence. Predictions are advisory only.`,
+      y,
+      pageTitle,
+      { size: 8, color: DARK }
+    );
+    y += 3;
+    const pmRows = (pm.rows || []).map((r) => ({
+      metric: r.metric,
+      current: r.current,
+      trend: r.trend,
+      eta: r.etaWarning !== "—" ? r.etaWarning : r.etaCritical,
+      conf: r.confidence,
+      risk: r.risk,
+    }));
+    if (pmRows.length) {
+      y = drawTable(
+        doc,
+        y,
+        [
+          { key: "metric", label: "Metric", w: 42 },
+          { key: "current", label: "Current", w: 22 },
+          { key: "trend", label: "Trend", w: 28 },
+          { key: "eta", label: "Est. time", w: 28 },
+          { key: "conf", label: "Conf.", w: 18 },
+          { key: "risk", label: "Risk", w: 22 },
+        ],
+        pmRows,
+        pageTitle
+      );
+      y += 2;
+      (pm.rows || [])
+        .filter((r) => r.risk === "HIGH" || r.risk === "WARNING" || r.risk === "WATCH")
+        .forEach((r) => {
+          y = bodyText(
+            doc,
+            `${r.metric}: ${r.recommendation} (warning ${r.warning}, critical ${r.critical})`,
+            y,
+            pageTitle,
+            { size: 7.5, color: DARK }
+          );
+        });
+    } else {
+      y = bodyText(doc, "No predictive rows available for this period.", y, pageTitle, {
+        size: 8,
+        style: "italic",
+        color: GRAY,
+      });
+    }
+    y += 3;
   }
 
   // ═══ 7. FAULT & INCIDENT LOG ═══
@@ -1444,48 +1510,7 @@ export function exportReportPdf(reportData = {}) {
     }
   }
 
-  // ═══ 12. DIGITAL TWIN ═══
-  if (sectionOn(reportData, "digitalTwin")) {
-    y = ensureSpace(doc, y, 18, pageTitle);
-    y = sectionTitle(doc, "12. Digital Twin History", y, pageTitle);
-    const dt = reportData.digitalTwin || [];
-    if (!dt.length) {
-      y = bodyText(
-        doc,
-        reportData.digitalTwinEmptyMessage ||
-          "No Digital Twin simulations recorded.",
-        y,
-        pageTitle,
-        { size: 9, style: "italic", color: GRAY }
-      );
-      y += 4;
-    } else {
-      y = drawTable(
-        doc,
-        y,
-        [
-          { key: "timestamp", label: "Time", w: 36 },
-          { key: "component", label: "Component", w: 26 },
-          { key: "action", label: "Action", w: 36 },
-          { key: "risk", label: "Risk", w: 22 },
-          { key: "confidence", label: "Conf.", w: 18 },
-          { key: "executed", label: "Executed", w: 22 },
-          { key: "result", label: "Result", w: 22 },
-        ],
-        dt.map((s) => ({
-          timestamp: s.timestamp ? String(s.timestamp).replace("T", " ").slice(0, 19) : "-",
-          component: s.component,
-          action: s.action,
-          risk: s.risk,
-          confidence: s.confidence ?? "-",
-          executed: s.executed ? "Yes" : "No",
-          result: s.result || "-",
-        })),
-        pageTitle,
-        { fontSize: 6.5, rowH: 6 }
-      );
-    }
-  }
+  // ═══ RECOMMENDATIONS ═══
 
   // ═══ 13. RECOMMENDATIONS ═══
   if (sectionOn(reportData, "recommendations")) {

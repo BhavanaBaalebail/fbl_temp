@@ -66,6 +66,7 @@ export function DashboardUtilities({
   summary,
   connected,
   onOpenReports,
+  onOpenUtilities,
 }) {
   const grouped = groupUtilitiesByCategory(utilities);
   const categoryOrder = Object.keys(UTILITY_CATEGORIES);
@@ -73,7 +74,9 @@ export function DashboardUtilities({
   const handleAction = (utility) => {
     if (utility.action === "report_generation" || utility.action === "daily_reports") {
       onOpenReports?.();
+      return;
     }
+    onOpenUtilities?.();
   };
 
   return (
@@ -90,9 +93,18 @@ export function DashboardUtilities({
             {connected ? " · 5s refresh" : " · disconnected"}
           </p>
         </div>
-        {!connected && (
-          <StatusBadge status="critical" label="Backend unavailable" showDot={false} />
-        )}
+        <div className="flex items-center gap-2">
+          {!connected && (
+            <StatusBadge status="critical" label="Backend unavailable" showDot={false} />
+          )}
+          <button
+            type="button"
+            onClick={() => onOpenUtilities?.()}
+            className="text-xs font-medium text-[#38bdf8] hover:text-[#22d3ee]"
+          >
+            Open Utilities →
+          </button>
+        </div>
       </header>
 
       {categoryOrder.map((catKey) => {
