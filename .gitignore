@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Generated/local Python packages
+.pypdf_lib/
+
+# Generated reports
+.report_review/
+
+# Databases
+*.db
+
+# Node
+node_modules/
+dist/
+
+# Environment/secrets
+.env
+.env.*
+whatsapp.env
+email.env
+
+# macOS
+.DS_Store
