@@ -239,7 +239,11 @@ export async function exportReportDocx(reportData) {
         "Historical telemetry charts, fault markers, and recovery markers for the selected reporting window. Chart point series are embedded as tabular series summaries for editability."
       )
     );
+<<<<<<< HEAD
     const sys = reportData.systemResourceTrend || reportData.graphs?.overallHealth;
+=======
+    const sys = reportData.systemResourceTrend;
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     if (sys?.series?.length) {
       children.push(heading(sys.title || "System Resource Utilization", HeadingLevel.HEADING_2));
       sys.series.forEach((s) => {
@@ -248,6 +252,7 @@ export async function exportReportDocx(reportData) {
         );
       });
     }
+<<<<<<< HEAD
     if (reportData.loadShare?.slices?.length) {
       children.push(heading(reportData.loadShare.title || "Load Share by Component", HeadingLevel.HEADING_2));
       children.push(
@@ -261,6 +266,8 @@ export async function exportReportDocx(reportData) {
         )
       );
     }
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     (reportData.componentSections || []).forEach((comp) => {
       (comp.charts || []).forEach((ch) => {
         children.push(

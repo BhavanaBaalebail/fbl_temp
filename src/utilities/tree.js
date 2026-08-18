@@ -53,6 +53,7 @@ export const UTILITIES_TREE = [
     children: [
       { id: "backup-status", label: "Backup Status", icon: "report" },
       { id: "broadcast-message", label: "Broadcast Message", icon: "signal" },
+<<<<<<< HEAD
       { id: "email-alerts", label: "Email Alerts", icon: "signal" },
       { id: "daily-report", label: "Daily Report", icon: "chart" },
     ],
@@ -65,6 +66,12 @@ export const UTILITIES_TREE = [
       { id: "incident-analysis-utilities", label: "Incident Analysis Utilities", icon: "diagnostics" },
     ],
   },
+=======
+      { id: "whatsapp-alerts", label: "WhatsApp Alerts", icon: "signal" },
+      { id: "daily-report", label: "Daily Report", icon: "chart" },
+    ],
+  },
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 ];
 
 export function findUtilityMeta(utilityId) {

@@ -587,6 +587,7 @@ function drawMultiSeriesChart(doc, chart, x, y, w, h, reportData) {
   doc.text(pdfSafe(chart.yLabel || "Utilization (%)"), x + 2, y + 3);
 }
 
+<<<<<<< HEAD
 function rgbOf(color, fallback = NAVY) {
   if (Array.isArray(color) && color.length >= 3) return color.map(Number);
   return fallback;
@@ -656,6 +657,8 @@ function drawLoadShareChart(doc, loadShare, x, y, w, h) {
   });
 }
 
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 /** Fault / recovery event markers over time (severity bands). */
 function drawEventScatterChart(doc, events, x, y, w, h, reportData, emptyTitle) {
   doc.setDrawColor(...NAVY);
@@ -1121,19 +1124,26 @@ export function exportReportPdf(reportData = {}) {
     );
     y += 3;
 
+<<<<<<< HEAD
     const sysTrend = reportData.systemResourceTrend || reportData.graphs?.systemResourceTrend || reportData.graphs?.overallHealth;
+=======
+    const sysTrend = reportData.systemResourceTrend || reportData.graphs?.systemResourceTrend;
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     if (sysTrend?.series?.length) {
       y = placeChartBlock(doc, y, pageTitle, sysTrend.title || "System Resource Utilization", (cx, cy, cw, ch) => {
         drawMultiSeriesChart(doc, sysTrend, cx, cy, cw, ch, reportData);
       });
     }
 
+<<<<<<< HEAD
     if (reportData.loadShare?.slices?.length) {
       y = placeChartBlock(doc, y, pageTitle, reportData.loadShare.title || "Load Share by Component", (cx, cy, cw, ch) => {
         drawLoadShareChart(doc, reportData.loadShare, cx, cy, cw, ch);
       });
     }
 
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     componentSections.forEach((comp) => {
       const charts = (comp.charts || []).filter((ch) => (ch.points || []).length >= 2);
       charts.forEach((chart) => {

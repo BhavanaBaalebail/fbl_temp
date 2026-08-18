@@ -24,11 +24,15 @@ import {
 import { hasValue } from "../utils/value";
 import { generateReport, downloadFormatOutput } from "../../services/reports/reportGenerator";
 import { DEFAULT_SECTION_SELECTION } from "../../services/reports/reportSections";
+<<<<<<< HEAD
 import { fetchEmailStatus } from "../../services/emailAlertClient";
 import {
   IncidentAnalysisArchitecture,
   IncidentAnalysisPanel,
 } from "../../components/faults/IncidentAnalysisPanel";
+=======
+import { fetchWhatsAppStatus } from "../../services/whatsappAlertClient";
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 
 function Loading() {
   return <p className="text-sm text-[#64748b]">Loading…</p>;
@@ -908,8 +912,13 @@ function BroadcastMessagePanel() {
   );
 }
 
+<<<<<<< HEAD
 function EmailAlertsPanel() {
   const fetcher = useCallback(() => fetchEmailStatus(), []);
+=======
+function WhatsAppAlertsPanel() {
+  const fetcher = useCallback(() => fetchWhatsAppStatus(), []);
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
   const { loading, data, reload } = useLoad(fetcher);
   if (loading) return <Loading />;
 
@@ -918,17 +927,22 @@ function EmailAlertsPanel() {
   const lastLabel = last
     ? [
         last.component || last.metric || last.fault_id,
+<<<<<<< HEAD
         last.type === "warning_alert"
           ? "WARNING"
           : last.type === "critical_alert"
             ? "CRITICAL"
             : last.type,
+=======
+        last.type === "recovery" ? "Recovery" : "Critical",
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
         last.timestamp_label || null,
       ]
         .filter(Boolean)
         .join(" — ")
     : null;
 
+<<<<<<< HEAD
   const delivery =
     last?.status === "sent"
       ? "Email: Sent"
@@ -942,6 +956,12 @@ function EmailAlertsPanel() {
     <UtilityPanel
       title="Email Alerts"
       subtitle="WARNING/CRITICAL notifications via backend SMTP (credentials never exposed here)"
+=======
+  return (
+    <UtilityPanel
+      title="WhatsApp Alerts"
+      subtitle="Critical-fault notifications via backend WhatsApp service (credentials never exposed here)"
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
       layout="compact"
       actions={
         <button
@@ -960,8 +980,13 @@ function EmailAlertsPanel() {
           emphasize={enabled}
         />
         <CompactMetricCard
+<<<<<<< HEAD
           label="Channel"
           value={data?.channel || "email"}
+=======
+          label="Provider"
+          value={data?.provider || "—"}
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
         />
         <CompactMetricCard
           label="Recipient"
@@ -972,6 +997,7 @@ function EmailAlertsPanel() {
         className="mt-3 rounded-xl border px-3 py-2 text-xs text-[#94a3b8]"
         style={{ borderColor: "rgba(34,211,238,0.12)", background: "rgba(8,12,18,0.75)" }}
       >
+<<<<<<< HEAD
         <p>{data?.message || "Email notifications disabled/not configured"}</p>
         <p className="mt-1 text-[#64748b]">
           Last Alert: {lastLabel || "None recorded"}
@@ -981,12 +1007,23 @@ function EmailAlertsPanel() {
           WARNING and CRITICAL each send one email. Escalation from WARNING to CRITICAL
           sends one additional CRITICAL email. Repeats are suppressed until the fault
           recovers. Configure EMAIL_* / SMTP_* on the Flask host — never in the browser.
+=======
+        <p>{data?.message || "WhatsApp notifications disabled/not configured"}</p>
+        <p className="mt-1 text-[#64748b]">
+          Last Alert: {lastLabel || "None recorded"}
+        </p>
+        <p className="mt-2 text-[10px] leading-relaxed text-[#64748b]">
+          Only CRITICAL faults trigger alerts. Duplicates are suppressed until the fault
+          recovers. Configure WHATSAPP_* environment variables on the Flask host — never
+          in the browser.
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
         </p>
       </div>
     </UtilityPanel>
   );
 }
 
+<<<<<<< HEAD
 function IncidentAnalysisUtilitiesPage() {
   return (
     <UtilityPanel
@@ -1002,6 +1039,8 @@ function IncidentAnalysisUtilitiesPage() {
   );
 }
 
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 function DailyReportPanel({ onOpenReports }) {
   const [format, setFormat] = useState("pdf");
   const [range, setRange] = useState("24h");
@@ -1118,12 +1157,19 @@ export function UtilityWorkspace({ utilityId, onOpenReports }) {
       return <BackupStatusPanel />;
     case "broadcast-message":
       return <BroadcastMessagePanel />;
+<<<<<<< HEAD
     case "email-alerts":
       return <EmailAlertsPanel />;
     case "daily-report":
       return <DailyReportPanel onOpenReports={onOpenReports} />;
     case "incident-analysis-utilities":
       return <IncidentAnalysisUtilitiesPage />;
+=======
+    case "whatsapp-alerts":
+      return <WhatsAppAlertsPanel />;
+    case "daily-report":
+      return <DailyReportPanel onOpenReports={onOpenReports} />;
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     default:
       return <UtilityUnavailable message="Select a utility from the tree" />;
   }

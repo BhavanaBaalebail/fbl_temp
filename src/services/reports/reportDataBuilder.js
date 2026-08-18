@@ -804,6 +804,7 @@ function buildFaultDistribution(faults) {
   return { bySeverity, byComponent };
 }
 
+<<<<<<< HEAD
 function peakDiskUsage(sample) {
   const pcts = (sample.disk_mounts || []).map((m) => m.pct).filter((v) => v != null);
   return pcts.length ? Math.max(...pcts) : null;
@@ -837,6 +838,8 @@ function buildLoadShare(samples) {
   };
 }
 
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 /**
  * Transform SQLite /reports/data payload into report document model.
  */
@@ -920,12 +923,15 @@ export function buildReportDataFromHistory(apiPayload, config = {}) {
     trendSeries,
     graphs,
     visualAnalysis,
+<<<<<<< HEAD
     loadShare: buildLoadShare(samples),
     systemResourceTrend: {
       title: "System Resource Utilization",
       yLabel: "Utilization (%)",
       series: (overallHealthGraph.series || []).filter((s) => s.key !== "io_total_mbps"),
     },
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     spikes,
     logbook: buildLogbook(faults),
     faults,

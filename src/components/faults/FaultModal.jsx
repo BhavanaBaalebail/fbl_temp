@@ -18,7 +18,10 @@ import { analyzeRecovery } from "../../recovery/recoveryWorkflowEngine";
 import { faultShowsProcessCandidates } from "../../recovery/recoveryProcessDomain";
 import { StatusBadge } from "../ui/HardwareModule";
 import { RecoveryConsole } from "./RecoveryConsole";
+<<<<<<< HEAD
 import { IncidentAnalysisPanel } from "./IncidentAnalysisPanel";
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 import { theme } from "../../utils/theme";
 
 const SURFACE = {
@@ -660,12 +663,15 @@ export function FaultModal({
             </PanelCard>
           ) : null}
 
+<<<<<<< HEAD
           {hasMeaningful(faultId) ? (
             <PanelCard title="Incident Analysis Utilities">
               <IncidentAnalysisPanel incidentId={String(faultId)} compact />
             </PanelCard>
           ) : null}
 
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
           {showBottomRow ? (
             <div
               className={`grid gap-3 ${

@@ -58,7 +58,10 @@ export function exportReportJson(reportData) {
     })),
     graphSeries: {
       systemResourceTrend: reportData.systemResourceTrend || null,
+<<<<<<< HEAD
       loadShare: reportData.loadShare || null,
+=======
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
       byComponent: reportData.graphs?.byComponent || {},
       eventMarkers: reportData.eventMarkers || null,
     },

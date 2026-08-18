@@ -31,6 +31,10 @@ import {
 import { useTelemetry } from "./hooks/useTelemetry";
 import { useTopology } from "./hooks/useTopology";
 import { useFaults } from "./hooks/useFaults";
+<<<<<<< HEAD
+=======
+import { useWhatsAppCriticalAlerts } from "./hooks/useWhatsAppCriticalAlerts";
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 
 const tabs = ["Dashboard", "Connectivity", "Fault Detection", "Utilities", "Reports"];
 
@@ -212,6 +216,14 @@ function App() {
   const topology = useTopology(telemetry.topologyContext);
   const faults = useFaults(telemetry.faults);
 
+<<<<<<< HEAD
+=======
+  useWhatsAppCriticalAlerts(faults.faults, {
+    hostname: telemetry.hostname,
+    enabled: telemetry.connected,
+  });
+
+>>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
   const handleRecoveryComplete = () => {
     telemetry.refreshNow();
   };
