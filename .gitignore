@@ -19,10 +19,7 @@ dist/
 .env
 .env.*
 whatsapp.env
-<<<<<<< HEAD
 email.env
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 
 # macOS
 .DS_Store

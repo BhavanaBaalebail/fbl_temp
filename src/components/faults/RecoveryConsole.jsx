@@ -79,6 +79,7 @@ export function RecoveryConsole({
   onRecoveryComplete,
   mode = "actions",
   hideHistory = false,
+  children,
 }) {
   const [analysisResult, setAnalysisResult] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -193,6 +194,7 @@ export function RecoveryConsole({
     }
   };
 
+
   const confidence = analysis?.confidence || null;
   const recommendations = analysis?.recommendations || [];
   const showConfidence =
@@ -204,8 +206,8 @@ export function RecoveryConsole({
   const showRecommendations = recoverable;
   const showManualNotice = !recoverable && mode === "full";
 
-  return (
-    <div className="space-y-4">
+  const dialogs = (
+    <>
       <RecoveryRecommendationDialog
         open={showRecommendDialog}
         onClose={() => setShowRecommendDialog(false)}
@@ -222,334 +224,341 @@ export function RecoveryConsole({
         }}
         onProceed={handleConfirmProceed}
       />
+    </>
+  );
 
-      {showProcessCandidates ? (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: PANEL.border }}
-        >
-          <SectionHeader
-            title="Process Candidates"
-            subtitle="Live workloads — pause, resume, or terminate per PID"
-          />
-          <RecoveryProcessCandidates
-            fault={fault}
-            connected={connected}
-            capabilities={capabilities}
-            minPercent={processCandidatesMinPercent(processCandidatesDomainForFault(fault))}
-            onActionComplete={(actionResult) => {
-              refreshAnalysis();
-              onRecoveryComplete?.(actionResult);
-            }}
-          />
-        </section>
-      ) : null}
+  const slotProcess = showProcessCandidates ? (
+    <RecoveryProcessCandidates
+        fault={fault}
+        connected={connected}
+        capabilities={capabilities}
+        minPercent={processCandidatesMinPercent(processCandidatesDomainForFault(fault))}
+        onActionComplete={(actionResult) => {
+          refreshAnalysis();
+          onRecoveryComplete?.(actionResult);
+        }}
+      />
+  ) : null;
 
-      {showRecommendations ? (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: PANEL.border }}
-        >
-          <SectionHeader
-            title="Recovery Actions"
-            subtitle={analysis?.catalog?.label || undefined}
-          />
-          {loading ? (
-            <p className="text-sm text-[#64748b]">Generating recommendations…</p>
-          ) : (
-            <>
-              {recommendations.length > 0 ? (
-                <div className="space-y-2">
-                  {recommendations.slice(0, 6).map((rec) => (
-                    <div
-                      key={rec.actionId}
-                      className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 ${
-                        rec.disabled ? "opacity-50" : ""
-                      }`}
-                      style={{ background: PANEL.inner, borderColor: PANEL.border }}
-                    >
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm text-[#e2e8f0]">{rec.label}</span>
-                          <StatusBadge
-                            status={levelBadgeStatus(rec.level)}
-                            label={`L${rec.level}`}
-                            showDot={false}
-                          />
-                        </div>
-                        {hasMeaningful(rec.reason) ? (
-                          <p className="mt-0.5 text-xs text-[#64748b]">{rec.reason}</p>
-                        ) : null}
-                        {hasMeaningful(rec.disabledReason) ? (
-                          <p className="mt-0.5 text-[10px] text-[#f59e0b]">{rec.disabledReason}</p>
-                        ) : null}
-                      </div>
-                      {rec.confidence != null ? (
-                        <span className="font-mono-metrics text-[10px] text-[#64748b]">
-                          {rec.confidence}%
-                        </span>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-
-              {!analysis?.capabilitiesAvailable ? (
-                <p className="mt-3 text-xs text-[#f59e0b]">
-                  Recovery API not detected on :5000 — ensure CM.py is running with GET
-                  /recovery/capabilities.
-                </p>
-              ) : null}
-
-              {connected ? (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="hw-btn-primary px-4 py-2 text-sm font-semibold disabled:opacity-40"
-                    disabled={executing || loading}
-                    onClick={() => setShowRecommendDialog(true)}
-                  >
-                    {executing ? "Recovery In Progress…" : "Review Recovery Actions"}
-                  </button>
-                  {executing ? (
-                    <button
-                      type="button"
-                      className="hw-btn-filter px-4 py-2 text-sm"
-                      onClick={() => abortRef.current?.abort()}
-                    >
-                      Abort
-                    </button>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="mt-4 text-sm text-[#f59e0b]">
-                  Telemetry offline — recovery actions unavailable.
-                </p>
-              )}
-
-              {result ? (
+  const slotActionsInner = showRecommendations ? (
+    <div className="min-w-0 space-y-3">
+      {loading ? (
+        <p className="text-sm text-[#64748b]">Generating recommendations…</p>
+      ) : (
+        <>
+          {recommendations.length > 0 ? (
+            <div className="space-y-2">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
+                Recommended
+              </p>
+              {recommendations.slice(0, 6).map((rec) => (
                 <div
-                  className="mt-4 rounded-lg border p-3"
-                  style={{
-                    background: result.success
-                      ? "rgba(34,197,94,0.08)"
-                      : result.partial
-                        ? "rgba(245,158,11,0.08)"
-                        : "rgba(239,68,68,0.08)",
-                    borderColor: result.success
-                      ? "rgba(34,197,94,0.3)"
-                      : result.partial
-                        ? "rgba(245,158,11,0.3)"
-                        : "rgba(239,68,68,0.3)",
-                  }}
+                  key={rec.actionId}
+                  className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 ${
+                    rec.disabled ? "opacity-50" : ""
+                  }`}
+                  style={{ background: PANEL.inner, borderColor: PANEL.border }}
                 >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusBadge
-                      status={
-                        result.success ? "healthy" : result.partial ? "warning" : "critical"
-                      }
-                      label={
-                        result.recoveryStatus
-                          ? String(result.recoveryStatus).replace(/_/g, " ")
-                          : result.success
-                            ? "Recovered"
-                            : result.partial
-                              ? "Still Active"
-                              : result.aborted
-                                ? "Aborted"
-                                : "Recovery Failed"
-                      }
-                    />
-                    {result.actionStatus ? (
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold text-[#f1f5f9]">{rec.label}</span>
                       <StatusBadge
-                        status={
-                          result.actionStatus === "ACTION_SUCCESS" ? "warning" : "critical"
-                        }
-                        label={String(result.actionStatus).replace(/_/g, " ")}
+                        status={levelBadgeStatus(rec.level)}
+                        label={`L${rec.level}`}
                         showDot={false}
                       />
+                    </div>
+                    {hasMeaningful(rec.reason) ? (
+                      <p className="mt-0.5 text-xs text-[#64748b]">{rec.reason}</p>
                     ) : null}
-                    {formatDuration(result.durationMs) ? (
-                      <span className="font-mono-metrics text-xs text-[#64748b]">
-                        {formatDuration(result.durationMs)}
-                      </span>
+                    {hasMeaningful(rec.disabledReason) ? (
+                      <p className="mt-0.5 text-[10px] text-[#f59e0b]">{rec.disabledReason}</p>
                     ) : null}
                   </div>
-                  {hasMeaningful(result.reason) ? (
-                    <p className="mt-2 text-sm text-[#cbd5e1]">{result.reason}</p>
+                  {rec.confidence != null ? (
+                    <span className="shrink-0 font-mono-metrics text-[10px] text-[#64748b]">
+                      {rec.confidence}%
+                    </span>
                   ) : null}
                 </div>
-              ) : null}
-            </>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-[#94a3b8]">No recovery actions available.</p>
           )}
-        </section>
-      ) : showManualNotice ? (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: "rgba(239,68,68,0.2)" }}
-        >
-          <SectionHeader title="Recovery" />
-          <p className="text-sm text-[#94a3b8]">
-            No automated recovery playbook for this fault. Review evidence and remediate
-            manually.
-          </p>
-        </section>
-      ) : null}
 
-      {showConfidence ? (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: PANEL.border }}
-        >
-          <SectionHeader title="Recovery Confidence" />
-          <div className="flex flex-wrap items-center gap-4">
-            <div
-              className="relative flex h-16 w-16 items-center justify-center rounded-full border-2"
-              style={{
-                borderColor:
-                  confidence.percent >= 75
-                    ? "#22c55e"
-                    : confidence.percent >= 50
-                      ? "#f59e0b"
-                      : "#64748b",
-              }}
-            >
-              <span className="font-mono-metrics text-lg font-bold text-[#f1f5f9]">
-                {confidence.percent}%
-              </span>
-            </div>
-            <div>
-              {hasMeaningful(confidence.label) ? (
-                <div className="text-sm font-semibold text-[#f1f5f9]">
-                  {confidence.label} Confidence
-                </div>
-              ) : null}
-              {(confidence.factors || []).length > 0 ? (
-                <ul className="mt-1 space-y-0.5">
-                  {confidence.factors.map((f) => (
-                    <li key={f} className="text-xs text-[#64748b]">
-                      · {f}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-          </div>
-        </section>
-      ) : null}
+          {!analysis?.capabilitiesAvailable ? (
+            <p className="text-xs text-[#f59e0b]">
+              Recovery API not detected on :5000 — ensure CM.py is running with GET
+              /recovery/capabilities.
+            </p>
+          ) : null}
 
-      {showHistory ? (
-        <section
-          className="rounded-xl border p-4"
-          style={{ background: PANEL.bg, borderColor: PANEL.border }}
-        >
-          <SectionHeader title="Verification / Recovery History" />
-          <div className="space-y-2 pr-1">
-            {[...history].reverse().map((rec) => (
-              <article
-                key={rec.id}
-                className="rounded-lg border p-3"
-                style={{ background: PANEL.inner, borderColor: PANEL.border }}
+          {connected ? (
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="hw-btn-primary px-4 py-2 text-sm font-semibold disabled:opacity-40"
+                disabled={executing || loading}
+                onClick={() => setShowRecommendDialog(true)}
               >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  {formatTime(rec.timestamp) ? (
-                    <span className="font-mono-metrics text-xs text-[#64748b]">
-                      {formatTime(rec.timestamp)}
-                    </span>
-                  ) : (
-                    <span />
-                  )}
-                  <StatusBadge
-                    status={
-                      rec.recoveryStatus === "RECOVERED" || rec.result === "success"
-                        ? "healthy"
-                        : rec.recoveryStatus === "STILL_ACTIVE" ||
-                            rec.recoveryStatus === "VERIFICATION_UNAVAILABLE" ||
-                            rec.result === "partial" ||
-                            rec.result === "unverifiable" ||
-                            rec.result === "aborted"
-                          ? "warning"
-                          : "critical"
-                    }
-                    label={
-                      rec.recoveryStatus
-                        ? String(rec.recoveryStatus).replace(/_/g, " ")
-                        : rec.result === "success"
-                          ? "Success"
-                          : rec.result === "partial"
-                            ? "Partial"
-                            : rec.result
-                    }
-                    showDot={false}
-                  />
-                </div>
-                {rec.selectedAction?.label ? (
-                  <p className="mt-2 text-xs text-[#e2e8f0]">
-                    {rec.selectedAction.label}
-                    {rec.selectedAction.level != null
-                      ? ` · L${rec.selectedAction.level} ${
-                          RECOVERY_LEVEL_LABELS[rec.selectedAction.level] || ""
-                        }`
-                      : ""}
-                  </p>
-                ) : null}
-                {hasMeaningful(rec.verificationOutcome || rec.reason) ? (
-                  <p className="mt-1 text-xs text-[#64748b]">
-                    {rec.verificationOutcome || rec.reason}
-                  </p>
-                ) : null}
-                {(rec.before || rec.after) && (
-                  <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                    {(() => {
-                      const beforeText = formatSnapshotBrief(rec.before, fault);
-                      const afterText = formatSnapshotBrief(rec.after, fault);
-                      return (
-                        <>
-                          {beforeText ? (
-                            <div
-                              className="rounded border px-2 py-1.5 text-[10px] text-[#94a3b8]"
-                              style={{ borderColor: PANEL.border }}
-                            >
-                              <div className="font-semibold uppercase tracking-wider text-[#64748b]">
-                                Before
-                              </div>
-                              <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap font-mono-metrics text-[10px] text-[#cbd5e1]">
-                                {beforeText}
-                              </pre>
-                            </div>
-                          ) : null}
-                          {rec.selectedAction?.label ? (
-                            <div
-                              className="rounded border px-2 py-1.5 text-[10px] text-[#94a3b8]"
-                              style={{ borderColor: PANEL.border }}
-                            >
-                              <div className="font-semibold uppercase tracking-wider text-[#64748b]">
-                                Action
-                              </div>
-                              <p className="mt-1 text-[#e2e8f0]">{rec.selectedAction.label}</p>
-                            </div>
-                          ) : null}
-                          {afterText ? (
-                            <div
-                              className="rounded border px-2 py-1.5 text-[10px] text-[#94a3b8]"
-                              style={{ borderColor: PANEL.border }}
-                            >
-                              <div className="font-semibold uppercase tracking-wider text-[#64748b]">
-                                After
-                              </div>
-                              <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap font-mono-metrics text-[10px] text-[#cbd5e1]">
-                                {afterText}
-                              </pre>
-                            </div>
-                          ) : null}
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-              </article>
-            ))}
+                {executing ? "Recovery In Progress…" : "Review Recovery Actions"}
+              </button>
+              {executing ? (
+                <button
+                  type="button"
+                  className="hw-btn-filter px-4 py-2 text-sm"
+                  onClick={() => abortRef.current?.abort()}
+                >
+                  Abort
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-sm text-[#f59e0b]">Telemetry offline — recovery actions unavailable.</p>
+          )}
+        </>
+      )}
+    </div>
+  ) : showManualNotice ? (
+    <p className="text-sm text-[#94a3b8]">
+      No automated recovery playbook for this fault. Review evidence and remediate
+      manually.
+    </p>
+  ) : (
+    <p className="text-sm text-[#94a3b8]">No recovery actions available.</p>
+  );
+
+  const slotStatus = (
+    <div className="min-w-0 space-y-3">
+      <div>
+        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">Status</p>
+        <p className="mt-1 break-words font-mono-metrics text-sm font-semibold text-[#f1f5f9]">
+          {executing
+            ? "In progress"
+            : result
+              ? result.success
+                ? "Completed"
+                : result.partial
+                  ? "Partial"
+                  : result.aborted
+                    ? "Aborted"
+                    : "Failed"
+              : loading
+                ? "Analyzing…"
+                : recoverable
+                  ? "Ready"
+                  : "Not available"}
+        </p>
+      </div>
+      {result ? (
+        <div
+          className="rounded-lg border p-3"
+          style={{
+            background: result.success
+              ? "rgba(34,197,94,0.08)"
+              : result.partial
+                ? "rgba(245,158,11,0.08)"
+                : "rgba(239,68,68,0.08)",
+            borderColor: result.success
+              ? "rgba(34,197,94,0.3)"
+              : result.partial
+                ? "rgba(245,158,11,0.3)"
+                : "rgba(239,68,68,0.3)",
+          }}
+        >
+          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
+            Recovery Result
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <StatusBadge
+              status={result.success ? "healthy" : result.partial ? "warning" : "critical"}
+              label={
+                result.recoveryStatus
+                  ? String(result.recoveryStatus).replace(/_/g, " ")
+                  : result.success
+                    ? "Recovered"
+                    : result.partial
+                      ? "Still Active"
+                      : result.aborted
+                        ? "Aborted"
+                        : "Recovery Failed"
+              }
+            />
+            {result.actionStatus ? (
+              <StatusBadge
+                status={result.actionStatus === "ACTION_SUCCESS" ? "warning" : "critical"}
+                label={String(result.actionStatus).replace(/_/g, " ")}
+                showDot={false}
+              />
+            ) : null}
+            {formatDuration(result.durationMs) ? (
+              <span className="font-mono-metrics text-xs text-[#64748b]">
+                {formatDuration(result.durationMs)}
+              </span>
+            ) : null}
           </div>
+          {hasMeaningful(result.reason) ? (
+            <p className="mt-2 break-words text-sm text-[#cbd5e1]">{result.reason}</p>
+          ) : null}
+        </div>
+      ) : (
+        <p className="text-sm text-[#94a3b8]">No recovery result yet.</p>
+      )}
+    </div>
+  );
+
+  const slotConfidence = showConfidence ? (
+    <div className="flex flex-wrap items-center gap-4">
+      <div
+        className="relative flex h-20 w-20 shrink-0 items-center justify-center rounded-full border-2"
+        style={{
+          borderColor:
+            confidence.percent >= 75 ? "#22c55e" : confidence.percent >= 50 ? "#f59e0b" : "#64748b",
+        }}
+      >
+        <span className="font-mono-metrics text-xl font-bold text-[#f1f5f9]">{confidence.percent}%</span>
+      </div>
+      <div className="min-w-0">
+        {hasMeaningful(confidence.label) ? (
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
+              Confidence Level
+            </p>
+            <p className="mt-1 text-sm font-semibold text-[#f1f5f9]">{confidence.label}</p>
+          </div>
+        ) : null}
+        {(confidence.factors || []).length > 0 ? (
+          <div className="mt-2">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">Reason</p>
+            <ul className="mt-1 space-y-0.5">
+              {confidence.factors.map((f) => (
+                <li key={f} className="break-words text-xs leading-snug text-[#94a3b8]">
+                  {f}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  ) : (
+    <p className="text-sm text-[#94a3b8]">No recovery confidence available.</p>
+  );
+
+  const slotHistory = showHistory ? (
+    <div className="space-y-2 pr-1">
+      {[...history].reverse().map((rec) => (
+        <article
+          key={rec.id}
+          className="rounded-lg border p-3"
+          style={{ background: PANEL.inner, borderColor: PANEL.border }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {formatTime(rec.timestamp) ? (
+              <span className="font-mono-metrics text-xs text-[#64748b]">{formatTime(rec.timestamp)}</span>
+            ) : (
+              <span />
+            )}
+            <StatusBadge
+              status={
+                rec.recoveryStatus === "RECOVERED" || rec.result === "success"
+                  ? "healthy"
+                  : rec.recoveryStatus === "STILL_ACTIVE" ||
+                      rec.recoveryStatus === "VERIFICATION_UNAVAILABLE" ||
+                      rec.result === "partial" ||
+                      rec.result === "unverifiable" ||
+                      rec.result === "aborted"
+                    ? "warning"
+                    : "critical"
+              }
+              label={
+                rec.recoveryStatus
+                  ? String(rec.recoveryStatus).replace(/_/g, " ")
+                  : rec.result === "success"
+                    ? "Success"
+                    : rec.result === "partial"
+                      ? "Partial"
+                      : rec.result
+              }
+              showDot={false}
+            />
+          </div>
+          {rec.selectedAction?.label ? (
+            <p className="mt-2 break-words text-xs text-[#e2e8f0]">
+              {rec.selectedAction.label}
+              {rec.selectedAction.level != null
+                ? ` · L${rec.selectedAction.level} ${RECOVERY_LEVEL_LABELS[rec.selectedAction.level] || ""}`
+                : ""}
+            </p>
+          ) : null}
+          {hasMeaningful(rec.verificationOutcome || rec.reason) ? (
+            <p className="mt-1 break-words text-xs text-[#64748b]">
+              {rec.verificationOutcome || rec.reason}
+            </p>
+          ) : null}
+        </article>
+      ))}
+    </div>
+  ) : null;
+
+  const slots = {
+    dialogs,
+    status: slotStatus,
+    actions: (
+      <div className="space-y-4">
+        {slotProcess ? (
+          <div>
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
+              Process Candidates
+            </p>
+            {slotProcess}
+          </div>
+        ) : null}
+        {slotActionsInner}
+      </div>
+    ),
+    confidence: slotConfidence,
+    history: slotHistory,
+  };
+
+  if (typeof children === "function") {
+    return (
+      <div className="min-w-0">
+        {dialogs}
+        {children(slots)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {dialogs}
+      {slotProcess ? (
+        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
+          <SectionHeader title="Process Candidates" subtitle="Live workloads — pause, resume, or terminate per PID" />
+          {slotProcess}
+        </section>
+      ) : null}
+      {showRecommendations || showManualNotice ? (
+        <section
+          className="rounded-xl border p-4"
+          style={{ background: PANEL.bg, borderColor: showManualNotice ? "rgba(239,68,68,0.2)" : PANEL.border }}
+        >
+          <SectionHeader title="Recovery Actions" subtitle={analysis?.catalog?.label || undefined} />
+          {slotActionsInner}
+        </section>
+      ) : null}
+      {showConfidence ? (
+        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
+          <SectionHeader title="Recovery Confidence" />
+          {slotConfidence}
+        </section>
+      ) : null}
+      {showHistory ? (
+        <section className="rounded-xl border p-4" style={{ background: PANEL.bg, borderColor: PANEL.border }}>
+          <SectionHeader title="Verification / Recovery History" />
+          {slotHistory}
         </section>
       ) : null}
     </div>

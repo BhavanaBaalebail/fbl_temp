@@ -34,6 +34,20 @@ _IN_MEMORY: dict[str, dict[str, Any]] = {}
 
 UTILITY_IDS = ("analyze", "health", "rca", "forensic", "stall", "pid500")
 
+# CLI names → internal ids. Internal ids are also accepted.
+CLI_ALIASES: dict[str, str] = {
+    "analyze": "analyze",
+    "health-assess": "health",
+    "health": "health",
+    "unified-rca": "rca",
+    "rca": "rca",
+    "forensic": "forensic",
+    "stall-capture": "stall",
+    "stall": "stall",
+    "pid500": "pid500",
+    "stall-analyze": "stall_analyze",
+}
+
 UTILITY_META: dict[str, dict[str, Any]] = {
     "analyze": {
         "id": "analyze",
@@ -92,6 +106,16 @@ UTILITY_META: dict[str, dict[str, Any]] = {
         "timeout_sec": 90,
         "requires_root": False,
     },
+    "stall_analyze": {
+        "id": "stall_analyze",
+        "script_name": "analyze_stall.sh",
+        "label": "Stall Analyze",
+        "purpose": "Analyze previously captured stall evidence (analyze_stall.sh).",
+        "env_key": "ANALYZE_STALL_SCRIPT",
+        "timeout_sec": 180,
+        "requires_root": True,
+        "cli_only": True,
+    },
 }
 
 _PATH_RE = re.compile(r"(/tmp/[A-Za-z0-9._/\-]+)")
@@ -132,6 +156,29 @@ def _demo_forced() -> bool:
         except Exception:  # noqa: BLE001
             return False
     return False
+
+
+def resolve_cli_name(name: str) -> str:
+    key = (name or "").strip().lower()
+    if key not in CLI_ALIASES:
+        raise ValueError(f"Unknown utility '{name}'")
+    return CLI_ALIASES[key]
+
+
+def script_availability(utility_id: str) -> dict[str, Any]:
+    """AVAILABLE / MISSING / NOT EXECUTABLE for a utility id."""
+    if utility_id == "stall_analyze":
+        path = resolve_analyze_stall() or resolve_script_path(utility_id)
+    else:
+        path = resolve_script_path(utility_id)
+    if path is None:
+        return {"status": "MISSING", "path": None, "executable": False}
+    executable = os.access(path, os.X_OK)
+    return {
+        "status": "AVAILABLE" if executable else "NOT EXECUTABLE",
+        "path": str(path),
+        "executable": executable,
+    }
 
 
 def resolve_script_path(utility_id: str) -> Optional[Path]:
@@ -592,7 +639,7 @@ def _write_demo_bundle(utility_id: str, execution_id: str, work: Path) -> dict[s
         snap = work / f"forensic_{stamp}.txt"
         snap.write_text(stdout, encoding="utf-8")
         extra_files.append(str(snap))
-    elif utility_id == "stall":
+    elif utility_id in ("stall", "stall_analyze"):
         stdout += (
             "Stall Capture Setup completed (simulated)\n"
             "analyze_stall.sh findings (simulated):\n"
@@ -647,7 +694,7 @@ def _interpret(utility_id: str, combined: str, extra_files: list[str], html_hint
     elif utility_id == "forensic":
         summary = "Forensic snapshot captured. Raw process listing is retained on disk; UI shows a summary only."
         findings = [line.strip() for line in combined.splitlines() if line.strip()][:6]
-    elif utility_id == "stall":
+    elif utility_id in ("stall", "stall_analyze"):
         parsed = parse_rca(combined)
         summary = parsed.get("primary_root_cause") or "Stall capture completed."
         findings = parsed.get("evidence") or summarize_analyze(combined)
@@ -666,9 +713,14 @@ def execute_utility(
     incident_id: Optional[str],
     operator: str,
     force_demo: bool = False,
+    wait: bool = False,
+    allow_implicit_demo: bool = True,
+    include_stall_analyze: Optional[bool] = None,
 ) -> dict[str, Any]:
     if utility_id not in UTILITY_META:
         raise ValueError("invalid utility")
+    if include_stall_analyze is None:
+        include_stall_analyze = utility_id == "stall"
     execution_id = _new_execution_id()
     started = time.time()
     record: dict[str, Any] = {
@@ -700,9 +752,12 @@ def execute_utility(
         record["status"] = "RUNNING"
         persist_execution(record)
         work = _exec_dir(execution_id)
-        script = resolve_script_path(utility_id)
-        use_demo = force_demo or (_demo_forced() and (script is None or not os.access(script, os.X_OK)))
-        if script is None and not (force_demo or _demo_forced()):
+        script = resolve_analyze_stall() if utility_id == "stall_analyze" else resolve_script_path(utility_id)
+        implicit_demo = allow_implicit_demo and _demo_forced() and (
+            script is None or not os.access(script, os.X_OK)
+        )
+        use_demo = bool(force_demo) or implicit_demo
+        if script is None and not use_demo:
             reason, action = _fail_reason("", 127, False, True)
             record.update(
                 {
@@ -710,7 +765,7 @@ def execute_utility(
                     "exit_code": 127,
                     "error": reason,
                     "recommended_action": action,
-                    "summary": "Analysis Failed",
+                    "summary": "FAILED\nScript not found",
                     "completed_at_epoch": time.time(),
                     "completed_at": _utc_iso(),
                 }
@@ -721,17 +776,17 @@ def execute_utility(
                 execution_id,
             )
             return
-        if script is None:
-            use_demo = True
 
         result: dict[str, Any]
         if use_demo:
             result = _write_demo_bundle(utility_id, execution_id, work)
         else:
             argv = [str(script)]
-            if not os.access(script, os.X_OK):
+            if script is not None and not os.access(script, os.X_OK):
                 argv = ["bash", str(script)]
-            if utility_id == "stall" and os.environ.get("INCIDENT_STALL_SUDO", "").strip().lower() in (
+            if utility_id in ("stall", "stall_analyze") and os.environ.get(
+                "INCIDENT_STALL_SUDO", ""
+            ).strip().lower() in (
                 "1",
                 "true",
                 "yes",
@@ -741,7 +796,12 @@ def execute_utility(
             run = _run_argv(argv, timeout, cwd=work)
             stdout = run.get("stdout") or ""
             stderr = run.get("stderr") or ""
-            if utility_id == "stall" and not run.get("timeout") and run.get("returncode") == 0:
+            if (
+                include_stall_analyze
+                and utility_id == "stall"
+                and not run.get("timeout")
+                and run.get("returncode") == 0
+            ):
                 companion = resolve_analyze_stall()
                 if companion is not None:
                     companion_argv = [str(companion)]
@@ -816,6 +876,9 @@ def execute_utility(
             record.get("output_location"),
         )
 
+    if wait:
+        _worker()
+        return load_execution(execution_id) or record
     threading.Thread(target=_worker, name=f"ia-{execution_id}", daemon=True).start()
     return record
 
@@ -911,6 +974,8 @@ def register_incident_analysis_routes(
     @app.route("/incident-analysis/run/<utility_id>", methods=["POST"])
     def incident_analysis_run(utility_id: str):
         uid = (utility_id or "").strip().lower()
+        if uid in CLI_ALIASES:
+            uid = CLI_ALIASES[uid]
         if uid not in UTILITY_META:
             return jsonify({"error": "Unknown utility. Request rejected.", "allowlist": list(UTILITY_IDS)}), 400
         body = request.get_json(silent=True) or {}

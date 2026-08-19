@@ -18,10 +18,7 @@ import { analyzeRecovery } from "../../recovery/recoveryWorkflowEngine";
 import { faultShowsProcessCandidates } from "../../recovery/recoveryProcessDomain";
 import { StatusBadge } from "../ui/HardwareModule";
 import { RecoveryConsole } from "./RecoveryConsole";
-<<<<<<< HEAD
 import { IncidentAnalysisPanel } from "./IncidentAnalysisPanel";
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 import { theme } from "../../utils/theme";
 
 const SURFACE = {
@@ -129,6 +126,46 @@ function StatCard({ label, value, accent }) {
   );
 }
 
+function AccordionSection({ id, title, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const panelId = `viewmore-${id}`;
+  return (
+    <section
+      className="overflow-hidden rounded-lg border"
+      style={{ background: SURFACE.panel, borderColor: SURFACE.border }}
+    >
+      <h3 className="m-0">
+        <button
+          type="button"
+          id={`${panelId}-header`}
+          aria-expanded={open}
+          aria-controls={panelId}
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left outline-none transition-colors hover:bg-[rgba(34,211,238,0.04)] focus-visible:ring-2 focus-visible:ring-[#22d3ee] focus-visible:ring-offset-0"
+        >
+          <span className="min-w-0 font-display text-sm font-semibold tracking-tight text-[#f1f5f9] sm:text-base">
+            {title}
+          </span>
+          <span className="shrink-0 text-xs text-[#67e8f9]" aria-hidden="true">
+            {open ? "▲" : "▼"}
+          </span>
+        </button>
+      </h3>
+      {open ? (
+        <div
+          id={panelId}
+          role="region"
+          aria-labelledby={`${panelId}-header`}
+          className="max-h-[min(70vh,640px)] overflow-x-hidden overflow-y-auto border-t px-3 py-3"
+          style={{ borderColor: SURFACE.border }}
+        >
+          {children}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function PanelCard({ title, children, className = "" }) {
   if (!children) return null;
   return (
@@ -136,7 +173,7 @@ function PanelCard({ title, children, className = "" }) {
       className={`rounded-lg border p-3 ${className}`}
       style={{ background: SURFACE.panel, borderColor: SURFACE.border }}
     >
-      <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#64748b]">
+      <h3 className="mb-2 font-display text-sm font-semibold tracking-tight text-[#f1f5f9]">
         {title}
       </h3>
       {children}
@@ -154,7 +191,7 @@ function EvidenceCell({ label, value }) {
       <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#64748b]">
         {label}
       </div>
-      <div className="mt-0.5 truncate font-mono-metrics text-xs text-[#e2e8f0]">
+      <div className="mt-0.5 break-words font-mono-metrics text-sm font-semibold text-[#f1f5f9]">
         {String(value)}
       </div>
     </div>
@@ -175,7 +212,7 @@ function MetricStrip({ pairs }) {
           <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#64748b]">
             {label}
           </div>
-          <div className="mt-0.5 truncate font-mono-metrics text-[11px] text-[#e2e8f0]">
+          <div className="mt-0.5 break-words font-mono-metrics text-sm font-semibold text-[#e2e8f0]">
             {String(value)}
           </div>
         </div>
@@ -184,7 +221,7 @@ function MetricStrip({ pairs }) {
   );
 }
 
-function VerificationPanel({ faultId, fault }) {
+function VerificationPanel({ faultId, fault, embed = false }) {
   const [history, setHistory] = useState(() => getRecoveryHistory(faultId));
 
   useEffect(() => {
@@ -208,23 +245,26 @@ function VerificationPanel({ faultId, fault }) {
     return null;
   }
 
-  return (
-    <PanelCard title="Verification">
+  const body = (
+    <>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <EvidenceCell label="Before" value={before} />
         <EvidenceCell label="After" value={after} />
         <EvidenceCell label="Result" value={result} />
       </div>
       {latest.selectedAction?.label ? (
-        <p className="mt-2 text-[11px] text-[#94a3b8]">
+        <p className="mt-2 break-words text-[11px] text-[#94a3b8]">
           {latest.selectedAction.label}
           {latest.selectedAction.level != null
             ? ` · L${latest.selectedAction.level}`
             : ""}
         </p>
       ) : null}
-    </PanelCard>
+    </>
   );
+
+  if (embed) return body;
+  return <PanelCard title="Verification">{body}</PanelCard>;
 }
 
 function buildTelemetryEvidence(fault) {
@@ -643,60 +683,71 @@ export function FaultModal({
             </div>
           )}
 
-          {showMetricsSection ? (
-            <PanelCard title="Metrics / Evidence">
-              {hasPriorityEvidence ? (
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <EvidenceCell label="Current" value={priorityEvidence.current} />
-                  <EvidenceCell label="Threshold" value={priorityEvidence.threshold} />
-                  <EvidenceCell label="Previous" value={priorityEvidence.previous} />
-                  <EvidenceCell label="Status" value={priorityEvidence.status} />
-                </div>
-              ) : analysisLoading ? (
-                <p className="text-sm text-[#64748b]">Collecting evidence…</p>
-              ) : null}
-              {hasSecondaryMetrics ? (
-                <div className={hasPriorityEvidence ? "mt-2 border-t border-[rgba(34,211,238,0.08)] pt-2" : ""}>
-                  <MetricStrip pairs={secondaryMetrics} />
-                </div>
-              ) : null}
-            </PanelCard>
-          ) : null}
-
-<<<<<<< HEAD
-          {hasMeaningful(faultId) ? (
-            <PanelCard title="Incident Analysis Utilities">
-              <IncidentAnalysisPanel incidentId={String(faultId)} compact />
-            </PanelCard>
-          ) : null}
-
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
-          {showBottomRow ? (
-            <div
-              className={`grid gap-3 ${
-                showRecoverySection && hasVerification ? "lg:grid-cols-2" : "grid-cols-1"
-              }`}
-            >
-              {showRecoverySection ? (
-                <PanelCard title="Recovery" className="min-w-0">
-                  <div className="[&_.rounded-xl]:rounded-lg [&_.rounded-xl]:border [&_.p-4]:p-3 [&_.space-y-4]:space-y-2 [&_section]:border-0 [&_section]:p-0 [&_section]:shadow-none">
-                    <RecoveryConsole
-                      fault={faultForView}
-                      connected={connected}
-                      mode="actions"
-                      hideHistory
-                      onRecoveryComplete={onRecoveryComplete}
-                    />
+          <AccordionSection id="metrics" title="Metrics / Evidence" defaultOpen>
+            {showMetricsSection ? (
+              <>
+                {hasPriorityEvidence ? (
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <EvidenceCell label="Current" value={priorityEvidence.current} />
+                    <EvidenceCell label="Threshold" value={priorityEvidence.threshold} />
+                    <EvidenceCell label="Previous" value={priorityEvidence.previous} />
+                    <EvidenceCell label="Status" value={priorityEvidence.status} />
                   </div>
-                </PanelCard>
-              ) : null}
+                ) : analysisLoading ? (
+                  <p className="text-sm text-[#64748b]">Collecting evidence…</p>
+                ) : null}
+                {hasSecondaryMetrics ? (
+                  <div className={hasPriorityEvidence ? "mt-2 border-t border-[rgba(34,211,238,0.08)] pt-2" : ""}>
+                    <MetricStrip pairs={secondaryMetrics} />
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <p className="text-sm text-[#94a3b8]">No metrics or evidence available.</p>
+            )}
+          </AccordionSection>
 
-              {hasVerification ? (
-                <VerificationPanel faultId={faultId} fault={faultForView} />
-              ) : null}
-            </div>
-          ) : null}
+          <AccordionSection id="incident-analysis" title="Incident Analysis Utilities">
+            {hasMeaningful(faultId) ? (
+              <IncidentAnalysisPanel incidentId={String(faultId)} compact />
+            ) : (
+              <p className="text-sm text-[#94a3b8]">No incident analysis has been run yet.</p>
+            )}
+          </AccordionSection>
+
+          <RecoveryConsole
+            fault={faultForView}
+            connected={connected}
+            mode="actions"
+            hideHistory
+            onRecoveryComplete={onRecoveryComplete}
+          >
+            {(slots) => (
+              <>
+                <AccordionSection id="recovery" title="Recovery">
+                  <div className="space-y-3">
+                    {slots.status}
+                    {hasVerification ? (
+                      <div className="border-t pt-3" style={{ borderColor: SURFACE.border }}>
+                        <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
+                          Verification
+                        </p>
+                        <VerificationPanel faultId={faultId} fault={faultForView} embed />
+                      </div>
+                    ) : (
+                      <p className="text-sm text-[#94a3b8]">No verification data available.</p>
+                    )}
+                  </div>
+                </AccordionSection>
+                <AccordionSection id="recovery-actions" title="Recovery Actions">
+                  {slots.actions}
+                </AccordionSection>
+                <AccordionSection id="recovery-confidence" title="Recovery Confidence">
+                  {slots.confidence}
+                </AccordionSection>
+              </>
+            )}
+          </RecoveryConsole>
         </div>
       </main>
     </div>

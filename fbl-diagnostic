@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""fbl-diagnostic entrypoint. Keep this file next to fbl_incident_analysis.py (e.g. /home/rvu)."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+candidates = [HERE]
+env_home = os.environ.get("FBL_HOME", "").strip()
+if env_home:
+    candidates.append(Path(env_home))
+candidates.append(Path("/home/rvu"))
+for folder in candidates:
+    if (folder / "fbl_incident_analysis.py").is_file():
+        sys.path.insert(0, str(folder))
+        break
+else:
+    sys.path.insert(0, str(HERE))
+
+from fbl_diagnostic_cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

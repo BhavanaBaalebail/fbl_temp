@@ -159,4 +159,18 @@ Forensic listings are truncated in the UI; the full snapshot stays on disk.
 
 Utility ids: `analyze`, `health`, `rca`, `forensic`, `stall`, `pid500`.
 
-Deploy `fbl_incident_analysis.py`, `incident_scripts/`, and the updated `CM.py` / `telemetry_db.py` to the Linux collector and restart `python3 CM.py`.
+## CLI (`fbl-diagnostic`)
+
+SSH on the collector and run the **same** execution service as the UI. See [fbl-diagnostic.md](fbl-diagnostic.md).
+
+```bash
+cd /home/rvu
+./fbl-diagnostic list
+./fbl-diagnostic run analyze
+./fbl-diagnostic run health-assess
+./fbl-diagnostic run unified-rca
+```
+
+Copy `fbl-diagnostic` and `fbl_diagnostic_cli.py` next to `cm.py`. Do not start them from `start_fbl.sh`.
+
+Deploy `fbl_incident_analysis.py`, `incident_scripts/`, `fbl-diagnostic`, `fbl_diagnostic_cli.py`, and the updated `CM.py` / `telemetry_db.py` to the Linux collector and restart `python3 cm.py` for the UI.

@@ -100,5 +100,50 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 403)
 
 
+class CliServiceTests(unittest.TestCase):
+    def test_cli_aliases(self):
+        self.assertEqual(ia.resolve_cli_name("health-assess"), "health")
+        self.assertEqual(ia.resolve_cli_name("unified-rca"), "rca")
+        self.assertEqual(ia.resolve_cli_name("stall-capture"), "stall")
+        with self.assertRaises(ValueError):
+            ia.resolve_cli_name("rm -rf /")
+
+    def test_missing_script_fails_without_demo(self):
+        with mock.patch.object(ia, "resolve_script_path", return_value=None):
+            record = ia.execute_utility(
+                "analyze",
+                incident_id="fault-cli-1",
+                operator="pytest",
+                wait=True,
+                allow_implicit_demo=False,
+                force_demo=False,
+            )
+        self.assertEqual(record["status"], "FAILED")
+        self.assertEqual(record["exit_code"], 127)
+        self.assertFalse(record.get("demo"))
+        self.assertIn("Script not found", record.get("summary") or "")
+
+    def test_explicit_demo_is_labeled(self):
+        record = ia.execute_utility(
+            "rca",
+            incident_id="fault-cli-demo",
+            operator="pytest",
+            wait=True,
+            allow_implicit_demo=False,
+            force_demo=True,
+        )
+        self.assertEqual(record["status"], "COMPLETED")
+        self.assertTrue(record.get("demo"))
+        self.assertIn("DEMO MODE", record.get("raw_output") or "")
+        parsed = record.get("parsed") or {}
+        self.assertEqual(parsed.get("primary_root_cause"), "STORAGE LATENCY")
+
+    def test_cli_rejects_unknown_utility(self):
+        from fbl_diagnostic_cli import main
+
+        code = main(["run", "not-a-tool"])
+        self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

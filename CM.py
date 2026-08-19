@@ -164,7 +164,6 @@ except Exception:  # noqa: BLE001
     fbl_chatbot = None  # type: ignore
 
 try:
-<<<<<<< HEAD
     import fbl_email
 except Exception:  # noqa: BLE001
     fbl_email = None  # type: ignore
@@ -173,11 +172,6 @@ try:
     import fbl_incident_analysis
 except Exception:  # noqa: BLE001
     fbl_incident_analysis = None  # type: ignore
-=======
-    import fbl_whatsapp
-except Exception:  # noqa: BLE001
-    fbl_whatsapp = None  # type: ignore
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 
 
 
@@ -6017,28 +6011,17 @@ def updater_loop() -> None:
                 poll_result = telemetry_db.persist_poll_cycle(
                     db_metrics, db_inventory, db_link_health
                 )
-<<<<<<< HEAD
                 if fbl_email is not None and isinstance(poll_result, dict):
                     try:
                         fbl_email.handle_poll_alert_faults(
                             poll_result.get("alert_faults")
                             or poll_result.get("critical_faults")
                             or [],
-=======
-                if fbl_whatsapp is not None and isinstance(poll_result, dict):
-                    try:
-                        fbl_whatsapp.handle_poll_critical_faults(
-                            poll_result.get("critical_faults") or [],
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
                             hostname=poll_result.get("hostname"),
                         )
                     except Exception:
                         logger.exception(
-<<<<<<< HEAD
                             "Email notification hook failed (telemetry unaffected)"
-=======
-                            "WhatsApp notification hook failed (telemetry unaffected)"
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
                         )
             except Exception:
                 logger.exception("Failed to persist telemetry poll cycle to database")
@@ -6085,13 +6068,8 @@ if fbl_chatbot is not None:
     except Exception:
         logger.exception("Failed to register FBL chatbot routes")
 
-<<<<<<< HEAD
 if fbl_email is not None:
     def _email_latest():
-=======
-if fbl_whatsapp is not None:
-    def _whatsapp_latest():
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
         with _state_lock:
             return (
                 dict(LATEST_METRICS or {}),
@@ -6100,7 +6078,6 @@ if fbl_whatsapp is not None:
             )
 
     try:
-<<<<<<< HEAD
         fbl_email.register_email_routes(app, get_latest=_email_latest)
     except Exception:
         logger.exception("Failed to register FBL email notification routes")
@@ -6121,11 +6098,6 @@ if fbl_incident_analysis is not None:
         )
     except Exception:
         logger.exception("Failed to register FBL incident analysis routes")
-=======
-        fbl_whatsapp.register_whatsapp_routes(app, get_latest=_whatsapp_latest)
-    except Exception:
-        logger.exception("Failed to register FBL WhatsApp notification routes")
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 
 
 @app.route("/inventory")

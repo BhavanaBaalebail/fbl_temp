@@ -238,7 +238,6 @@ CREATE TABLE IF NOT EXISTS notification_open_alerts (
 );
 """
 
-<<<<<<< HEAD
 NOTIFICATION_SEVERITY_STATE_DDL = """
 CREATE TABLE IF NOT EXISTS notification_severity_state (
     fault_id TEXT NOT NULL,
@@ -266,8 +265,6 @@ CREATE TABLE IF NOT EXISTS incident_analysis_executions (
 );
 """
 
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 # Columns that may be missing on older DBs — added via ALTER TABLE.
 _TELEMETRY_EXTRA_COLUMNS = [
     ("timestamp", "TEXT"),
@@ -321,7 +318,6 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: list[tuple[st
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
 
 
-<<<<<<< HEAD
 def _migrate_notification_severity_state(conn: sqlite3.Connection) -> None:
     """Copy legacy per-fault open alerts into fault_id + severity rows."""
     tables = {
@@ -364,8 +360,6 @@ def _migrate_notification_severity_state(conn: sqlite3.Connection) -> None:
         )
 
 
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 def init_db() -> None:
     """Create database file, enable WAL, ensure tables/indexes/columns exist."""
     global _last_cleanup_at
@@ -383,12 +377,9 @@ def init_db() -> None:
             conn.execute(UTILITY_EVENTS_DDL)
             conn.execute(NOTIFICATION_EVENTS_DDL)
             conn.execute(NOTIFICATION_OPEN_ALERTS_DDL)
-<<<<<<< HEAD
             conn.execute(NOTIFICATION_SEVERITY_STATE_DDL)
             conn.execute(INCIDENT_ANALYSIS_DDL)
             _migrate_notification_severity_state(conn)
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 
             _ensure_columns(conn, "telemetry_samples", _TELEMETRY_EXTRA_COLUMNS)
             _ensure_columns(conn, "fault_events", _FAULT_EXTRA_COLUMNS)
@@ -825,22 +816,16 @@ def persist_poll_cycle(
     critical_faults = [
         f for f in fault_rows if str(f.get("severity") or "").lower() == "critical"
     ]
-<<<<<<< HEAD
     alert_faults = [
         f
         for f in fault_rows
         if str(f.get("severity") or "").lower() in ("warning", "critical")
     ]
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     return {
         "hostname": row.get("hostname"),
         "collected_at": collected_at,
         "critical_faults": critical_faults,
-<<<<<<< HEAD
         "alert_faults": alert_faults,
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
         "fault_count": len(fault_rows),
     }
 
@@ -1010,11 +995,7 @@ def update_digital_twin_simulation(simulation_id: int, updates: dict[str, Any]) 
 
 
 # ---------------------------------------------------------------------------
-<<<<<<< HEAD
 # Utility + email notification audit
-=======
-# Utility + WhatsApp notification audit
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 # ---------------------------------------------------------------------------
 
 
@@ -1055,7 +1036,6 @@ def insert_utility_event(entry: dict[str, Any]) -> Optional[int]:
             conn.close()
 
 
-<<<<<<< HEAD
 def upsert_incident_analysis_execution(entry: dict[str, Any]) -> None:
     payload = json.dumps(entry.get("payload") or {}, default=str)
     with _db_lock:
@@ -1151,8 +1131,6 @@ def list_incident_analysis_executions(incident_id: Optional[str] = None, limit: 
             conn.close()
 
 
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 def query_utility_history(
     start: Optional[str] = None,
     end: Optional[str] = None,
@@ -1306,7 +1284,6 @@ def list_open_notification_alert_ids() -> list[str]:
             conn.close()
 
 
-<<<<<<< HEAD
 def _norm_alert_severity(severity: Optional[str]) -> str:
     value = str(severity or "").strip().lower()
     if value in ("warning", "warn"):
@@ -1404,8 +1381,6 @@ def list_notification_severity_states() -> list[dict[str, Any]]:
             conn.close()
 
 
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 def get_last_notification_event() -> Optional[dict[str, Any]]:
     with _db_lock:
         conn = _connect()
@@ -1969,11 +1944,8 @@ def get_database_stats() -> dict[str, Any]:
                 "utility_events",
                 "notification_events",
                 "notification_open_alerts",
-<<<<<<< HEAD
                 "notification_severity_state",
                 "incident_analysis_executions",
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
             ):
                 count = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
                 stats[table] = {"count": count}

@@ -4,19 +4,12 @@
  */
 
 export const severityData = [
-<<<<<<< HEAD
   { name: "CPU", value: 0, util: 0, share: 0, color: "#4d9fff" },
   { name: "GPU", value: 0, util: 0, share: 0, color: "#22d3ee" },
   { name: "RAM", value: 0, util: 0, share: 0, color: "#bb86fc" },
   { name: "Disk", value: 0, util: 0, share: 0, color: "#f59e0b" },
   { name: "NIC", value: 0, util: 0, share: 0, color: "#38bdf8" },
   { name: "I/O Controller", value: 0, util: 0, share: 0, color: "#10b981" },
-=======
-  { name: "Critical", value: 2, color: "#ff4444" },
-  { name: "Warning", value: 1, color: "#ff8c00" },
-  { name: "Resolved", value: 2, color: "#00c853" },
-  { name: "Info", value: 0, color: "#4d9fff" },
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 ];
 
 export const healthRows = [

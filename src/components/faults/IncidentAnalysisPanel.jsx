@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { incidentAnalysisApi } from "../../services/incidentAnalysisApi";
 import { StatusBadge } from "../ui/HardwareModule";
+import { IncidentDiagnosticCli } from "./IncidentDiagnosticCli";
 
 const SURFACE = {
   panel: "rgba(12, 18, 28, 0.92)",
@@ -57,7 +58,7 @@ function UtilityCard({ meta, result, busy, onRun, compact }) {
         className="mt-3 rounded-md border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-[#67e8f9] transition-colors hover:border-[rgba(34,211,238,0.45)] disabled:opacity-40"
         style={{ borderColor: SURFACE.border, background: "rgba(34,211,238,0.06)" }}
       >
-        {status === "RUNNING" || status === "QUEUED" ? "Running…" : "Run Analysis"}
+        {status === "RUNNING" || status === "QUEUED" ? "Running..." : "Run Analysis"}
       </button>
 
       {result ? (
@@ -67,7 +68,14 @@ function UtilityCard({ meta, result, busy, onRun, compact }) {
               Demo mode — simulated output, not live server evidence
             </div>
           ) : null}
-          <p className="text-xs text-[#cbd5e1]">{result.summary || result.error}</p>
+          {status === "COMPLETED" ? (
+            <p className="text-xs font-semibold text-[#34d399]">✓ Completed</p>
+          ) : status === "FAILED" || status === "TIMEOUT" ? (
+            <p className="text-xs font-semibold text-[#f87171]">✕ Failed</p>
+          ) : null}
+          {isRca && !parsed.primary_root_cause && !parsed.insufficient && status === "COMPLETED" ? (
+            <p className="text-xs text-[#94a3b8]">No RCA result available</p>
+          ) : null}
           {result.error ? (
             <p className="text-[11px] text-[#94a3b8]">
               Recommended action: {result.recommended_action}
@@ -145,7 +153,7 @@ function UtilityCard({ meta, result, busy, onRun, compact }) {
                 rel="noreferrer"
                 className="text-[11px] font-semibold uppercase tracking-wider text-[#94a3b8]"
               >
-                View Raw Output
+                {status === "FAILED" || status === "TIMEOUT" ? "View Error" : "View Result"}
               </a>
             ) : null}
           </div>
@@ -240,6 +248,8 @@ export function IncidentAnalysisPanel({ incidentId, compact = false }) {
         </div>
       ) : null}
       {error ? <p className="text-xs text-[#f87171]">{error}</p> : null}
+
+      <IncidentDiagnosticCli incidentId={incidentId} />
 
       {story && (story.primary_root_cause || story.insufficient) ? (
         <div className="rounded-lg border p-3" style={{ borderColor: SURFACE.border, background: SURFACE.panel }}>

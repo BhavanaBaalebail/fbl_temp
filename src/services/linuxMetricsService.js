@@ -11,22 +11,15 @@ import {
   buildTopologyContext,
   getLinkHealthSummary,
   getPrimaryGpu,
-<<<<<<< HEAD
   getPrimaryNicInterface,
   getPrimaryIoDevice,
-=======
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
   syncCpuThrottlePoll,
   isCpuThermalThrottlingNonFaultText,
 } from "./linkHealthService";
 import { enrichMetricsGpu } from "./gpuMetricsSupplement";
 
 const LINUX_SERVER =
-<<<<<<< HEAD
   import.meta.env.VITE_LINUX_SERVER || "http://10.17.28.162:5000";
-=======
-  import.meta.env.VITE_LINUX_SERVER || "http://10.17.19.37:5000";
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 
 const REFRESH_MS = 5000;
 
@@ -259,7 +252,6 @@ export function buildDashboardMetrics(inventory, metrics, linkHealth, healthRows
   ];
 }
 
-<<<<<<< HEAD
 function livePercent(value) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
 }
@@ -296,20 +288,6 @@ export function buildSeverityData(_healthRows, metrics, inventory, linkHealth) {
     share: total > 0 ? (row.util / total) * 100 : 0,
     color: row.color,
   }));
-=======
-export function buildSeverityData(healthRows) {
-  const critical = healthRows.filter((r) => r.level === "critical").length;
-  const warning = healthRows.filter((r) => r.level === "warning").length;
-  const healthy = healthRows.filter((r) => r.level === "healthy").length;
-  const unknown = healthRows.filter((r) => r.level === "unknown").length;
-
-  return [
-    { name: "Critical", value: critical, color: COLORS.critical },
-    { name: "Warning", value: warning, color: COLORS.warning },
-    { name: "Healthy", value: healthy, color: "#00c853" },
-    { name: "Unknown", value: unknown, color: COLORS.unknown },
-  ];
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
 }
 
 export function buildHealthStats(healthRows) {
@@ -342,11 +320,7 @@ export function buildTelemetrySnapshot(inventory, metrics, linkHealth) {
   return {
     health,
     metrics: buildDashboardMetrics(inventory, metrics, linkHealth, health, faults),
-<<<<<<< HEAD
     severity: buildSeverityData(health, metrics, inventory, linkHealth),
-=======
-    severity: buildSeverityData(health),
->>>>>>> caf72871fb35f53ee17e5d75b63821ea8af10048
     stats: buildHealthStats(health),
     faults,
     anomalyCategories,

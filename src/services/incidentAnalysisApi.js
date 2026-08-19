@@ -54,4 +54,15 @@ export const incidentAnalysisApi = {
     `${LINUX_SERVER}/incident-analysis/report/${encodeURIComponent(executionId)}`,
   rawUrl: (executionId) =>
     `${LINUX_SERVER}/incident-analysis/raw/${encodeURIComponent(executionId)}`,
+  raw: async (executionId) => {
+    try {
+      const res = await fetch(
+        `${LINUX_SERVER}/incident-analysis/raw/${encodeURIComponent(executionId)}`
+      );
+      const text = await res.text();
+      return { ok: res.ok, text };
+    } catch (err) {
+      return { ok: false, text: String(err?.message || err) };
+    }
+  },
 };
