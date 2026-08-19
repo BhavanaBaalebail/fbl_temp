@@ -94,7 +94,12 @@ export function FaultDetectionTab({
           liveMetrics={liveMetrics}
           liveLinkHealth={liveLinkHealth}
           liveInventory={liveInventory}
-          onRecoveryComplete={onRecoveryComplete}
+          onRecoveryComplete={(outcome) => {
+            onRecoveryComplete?.(outcome);
+            if (outcome?.navigateToFaultDetection) {
+              setActiveFaultModal(null);
+            }
+          }}
           onClose={() => setActiveFaultModal(null)}
         />
       ) : null}

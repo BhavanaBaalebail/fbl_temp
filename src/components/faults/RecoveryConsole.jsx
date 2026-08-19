@@ -168,7 +168,12 @@ export function RecoveryConsole({
       );
       setResult(outcome);
       setHistory(getRecoveryHistory(fault.id));
-      onRecoveryComplete?.(outcome);
+      const actionKey = `${recommendation.backendAction || ""} ${recommendation.actionId || ""}`;
+      const isTerminate = /kill|terminate/.test(actionKey);
+      onRecoveryComplete?.({
+        ...outcome,
+        navigateToFaultDetection: Boolean(isTerminate && outcome?.verifying),
+      });
     } catch (err) {
       setResult({ success: false, reason: err.message || "Recovery failed." });
     } finally {

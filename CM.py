@@ -3711,7 +3711,8 @@ _KERNEL_EVENT_PATTERNS = {
     "machine_check_exception": r"mce:|Machine check",
     "pcie_bus_error": r"PCIe Bus Error",
     "pcie_aer": r"AER:",
-    "edac": r"EDAC",
+    # Do not match bare "EDAC" — that hits driver/module names such as
+    # [ie31200_edac] on every boot. Real ECC faults use the two patterns below.
     "corrected_hardware_error": r"Corrected error",
     "uncorrectable_hardware_error": r"Uncorrectable Error",
     "fatal_hardware_error": r"Fatal.*(error|hardware)",
@@ -3749,10 +3750,27 @@ _KERNEL_EVENT_IGNORE_SUBSTRINGS = [
     "aer enabled",
 ]
 
+# Driver probe / BAR mapping / MCI registration — not an ECC or RAS fault
+# unless the same line also carries an error verb.
+_KERNEL_DRIVER_INIT_RE = re.compile(
+    r"register_mci|mapping multiple bars|\bprobe\b|\binitialized\b|"
+    r"module loaded|giving out device",
+    re.IGNORECASE,
+)
+_KERNEL_FAULT_SIGNAL_RE = re.compile(
+    r"\berror\b|\bfault\b|\bfail|\bpanic\b|\bfatal\b|"
+    r"uncorrectable|corrected error|machine check|\bxid\b|hardware error",
+    re.IGNORECASE,
+)
+
 
 def _is_ignorable_kernel_line(line: str) -> bool:
     lower = line.lower()
-    return any(substr in lower for substr in _KERNEL_EVENT_IGNORE_SUBSTRINGS)
+    if any(substr in lower for substr in _KERNEL_EVENT_IGNORE_SUBSTRINGS):
+        return True
+    if _KERNEL_DRIVER_INIT_RE.search(line) and not _KERNEL_FAULT_SIGNAL_RE.search(line):
+        return True
+    return False
 
 
 _TIMESTAMP_RE = re.compile(r"^(\S+\s+\S+\s+\S+|\S+T\S+)")

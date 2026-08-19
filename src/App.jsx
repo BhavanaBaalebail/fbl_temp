@@ -211,8 +211,12 @@ function App() {
   const topology = useTopology(telemetry.topologyContext);
   const faults = useFaults(telemetry.faults, { connected: telemetry.connected });
 
-  const handleRecoveryComplete = () => {
+  const handleRecoveryComplete = (outcome) => {
     telemetry.refreshNow();
+    if (outcome?.navigateToFaultDetection) {
+      setDashboardFaultModal(null);
+      setActiveTab("Fault Detection");
+    }
   };
 
   const dashboardFaultRow = dashboardFaultModal;

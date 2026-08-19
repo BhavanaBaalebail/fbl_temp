@@ -284,6 +284,7 @@ export function RecoveryProcessCandidates({
         actionSuccess: actionOk,
         recovered: false,
         message: detail,
+        navigateToFaultDetection: Boolean(isKill && actionOk),
       });
     } catch (err) {
       setActionStatus(RECOVERY_STATUS.ACTION_FAILED);

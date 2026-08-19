@@ -2212,46 +2212,9 @@ export function buildFaultLog(linkHealth, inventory, metrics) {
     });
   });
 
-  const events = lh.kernel_events || {};
-  const allEvents = [];
-  Object.keys(events).forEach((category) => {
-    (events[category] || []).forEach((ev) => {
-      allEvents.push({ ...ev, category });
-    });
-  });
-
-  allEvents
-    .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
-    .slice(0, 100)
-    .forEach((ev) => {
-      if (isRemovedComponentEvent(ev.message, ev.category, ev.device)) return;
-      if (isCpuThermalThrottlingNonFaultText(`${ev.message || ""} ${ev.category || ""} ${ev.device || ""}`)) {
-        return;
-      }
-      const severity =
-        ev.severity === "critical"
-          ? "Critical"
-          : ev.severity === "warning"
-            ? "Warning"
-            : "Resolved";
-      const component = inferComponent(ev.message, ev.category, ev.device);
-      if (!component) return;
-      faults.push({
-        id: `kernel-${id++}`,
-        severity,
-        component,
-        componentDot: COMPONENT_DOTS[component] || COLORS.unknown,
-        faultDescription: ev.message || "Kernel hardware event",
-        affectedPath: ev.device
-          ? `${component} → ${ev.device}`
-          : AFFECTED_PATHS[component] || "Platform",
-        detected: formatRelativeTime(ev.timestamp),
-        status: severity === "Resolved" ? "Resolved" : severity === "Critical" ? "Active" : "Monitor",
-        action: severity === "Resolved" ? "Log" : "View →",
-        source: "kernel_event",
-        kernelEvent: ev,
-      });
-    });
+  // Active Fault Log is live conditions only (threshold + health_summary).
+  // Kernel journal/dmesg matches stay in kernel_events for diagnostics —
+  // they are historical and would otherwise never clear after boot.
 
   const thresholdFaults = buildThresholdFaults(linkHealth, inventory, metrics);
   const enrichedThresholds = enrichThresholdFaultList(thresholdFaults, metrics, linkHealth, inventory);
