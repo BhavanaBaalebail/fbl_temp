@@ -1,13 +1,15 @@
 /**
  * useFaults Hook
  * Manages fault log filtering; fault data is supplied by live telemetry.
- * Overlays Recovered / recovery status only when post-action verification confirmed recovery.
+ * Overlays Verifying / Recovered only from recovery history + monitoring reconcile.
  */
 
 import { useState, useMemo, useEffect } from "react";
 import {
   getFaultRecoveryOverlay,
+  getResolvedFaults,
   isFaultAutoRecovered,
+  reconcileFaultLifecycle,
   subscribeRecoveryHistory,
   RECOVERY_STATUS,
 } from "../recovery/recoveryHistoryService";
@@ -20,23 +22,36 @@ function enrichFaultRow(row) {
   if (isFaultAutoRecovered(row.id)) {
     return {
       ...row,
-      status: "Recovered",
-      recoveryStatus: RECOVERY_STATUS.RECOVERED,
+      status: row.status || "Active",
+      recoveryStatus: RECOVERY_STATUS.STILL_ACTIVE,
+      recoveryNote: "Fault condition is present again after a previous recovery.",
+    };
+  }
+
+  if (
+    overlay.recoveryStatus === RECOVERY_STATUS.VERIFYING ||
+    overlay.recoveryStatus === RECOVERY_STATUS.ACTION_EXECUTING ||
+    (overlay.actionStatus === RECOVERY_STATUS.ACTION_SUCCESS &&
+      overlay.recoveryStatus !== RECOVERY_STATUS.STILL_ACTIVE &&
+      overlay.recoveryStatus !== RECOVERY_STATUS.RECOVERY_FAILED)
+  ) {
+    return {
+      ...row,
+      status: "Verifying",
+      recoveryStatus: overlay.recoveryStatus || RECOVERY_STATUS.VERIFYING,
       recoveryNote: overlay.verificationOutcome,
     };
   }
 
-  // Action taken but fault not recovered — keep Active, surface recovery note.
   if (
     overlay.recoveryStatus === RECOVERY_STATUS.STILL_ACTIVE ||
     overlay.recoveryStatus === RECOVERY_STATUS.RECOVERY_FAILED ||
-    overlay.recoveryStatus === RECOVERY_STATUS.VERIFICATION_UNAVAILABLE ||
-    overlay.actionStatus === RECOVERY_STATUS.ACTION_SUCCESS
+    overlay.recoveryStatus === RECOVERY_STATUS.VERIFICATION_UNAVAILABLE
   ) {
     return {
       ...row,
       status: row.status || "Active",
-      recoveryStatus: overlay.recoveryStatus || overlay.actionStatus,
+      recoveryStatus: overlay.recoveryStatus,
       recoveryNote: overlay.verificationOutcome,
     };
   }
@@ -44,38 +59,53 @@ function enrichFaultRow(row) {
   return row;
 }
 
-export function useFaults(faultRows = []) {
+export function useFaults(faultRows = [], { connected = false } = {}) {
   const [activeFaultFilter, setActiveFaultFilter] = useState("All");
   const [historyTick, setHistoryTick] = useState(0);
 
   useEffect(() => subscribeRecoveryHistory(() => setHistoryTick((n) => n + 1)), []);
 
+  useEffect(() => {
+    if (!connected) return;
+    reconcileFaultLifecycle(faultRows);
+  }, [faultRows, connected]);
+
   const enrichedRows = useMemo(
     () => faultRows.map(enrichFaultRow),
-    // historyTick forces recompute when recovery history changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [faultRows, historyTick]
   );
 
-  const filteredFaultRows = useMemo(() => {
-    if (activeFaultFilter === "All") return enrichedRows;
-    if (activeFaultFilter === "Resolved") {
-      return enrichedRows.filter(
+  const activeRows = useMemo(
+    () =>
+      enrichedRows.filter(
         (row) =>
-          row.severity.toLowerCase() === "resolved" ||
-          row.status === "Recovered" ||
-          row.recoveryStatus === RECOVERY_STATUS.RECOVERED
-      );
+          row.status !== "Recovered" && row.recoveryStatus !== RECOVERY_STATUS.RECOVERED
+      ),
+    [enrichedRows]
+  );
+
+  const resolvedFaults = useMemo(() => getResolvedFaults(), [historyTick, faultRows]);
+
+  const filteredFaultRows = useMemo(() => {
+    if (activeFaultFilter === "All") return activeRows;
+    if (activeFaultFilter === "Resolved") {
+      return resolvedFaults.map((row) => ({
+        ...row,
+        status: "Recovered",
+        severity: row.severity || "Resolved",
+      }));
     }
-    return enrichedRows.filter(
+    return activeRows.filter(
       (row) => row.severity.toLowerCase() === activeFaultFilter.toLowerCase()
     );
-  }, [enrichedRows, activeFaultFilter]);
+  }, [activeRows, resolvedFaults, activeFaultFilter]);
 
   return {
-    faults: enrichedRows,
+    faults: activeRows,
     activeFaultFilter,
     setActiveFaultFilter,
     filteredFaultRows,
+    resolvedFaults,
   };
 }

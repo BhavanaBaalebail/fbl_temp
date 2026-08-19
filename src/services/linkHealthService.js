@@ -246,6 +246,51 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Parse utilization/temp-style values: 100, "100", "100%", "100 %". */
+function parsePercentMetric(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const m = value.trim().replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+    if (!m) return null;
+    const n = Number(m[0]);
+    return Number.isFinite(n) ? n : null;
+  }
+  return num(value);
+}
+
+function maxProcessGpuComputePercent(metrics) {
+  const procs = metrics?.top_processes?.gpu;
+  if (!Array.isArray(procs) || procs.length === 0) return null;
+  let max = null;
+  procs.forEach((p) => {
+    const n = parsePercentMetric(p?.gpu_compute_percent);
+    if (n == null) return;
+    max = max == null ? n : Math.max(max, n);
+  });
+  return max;
+}
+
+/**
+ * Device-level GPU util from the same telemetry the dashboard already shows.
+ * Prefers nvidia-smi query-gpu, then nested link-health fields, then process SM%.
+ */
+function resolveGpuUtilizationPercent(gpu, metrics) {
+  if (!gpu && !metrics) return null;
+  const candidates = [
+    gpu?.gpu_utilization_percent,
+    gpu?.utilization_percent,
+    gpu?.gpu_util,
+    gpu?.utilization?.gpu,
+    gpu?.health?.gpu_utilization_percent,
+  ];
+  for (const c of candidates) {
+    const n = parsePercentMetric(c);
+    if (n != null) return n;
+  }
+  return maxProcessGpuComputePercent(metrics);
+}
+
 function cpuUtilThresholdLabel(severity) {
   return severity === "Critical"
     ? `≥ ${CPU_UTIL_THRESHOLDS.criticalMin}% (Critical)`
@@ -280,8 +325,8 @@ function gpuTemperatureLevel(tempC) {
  * Industry-standard sustained GPU utilization (80/90 rule — same as CPU).
  */
 function gpuUtilizationLevel(utilPct) {
-  if (utilPct == null || Number.isNaN(Number(utilPct))) return null;
-  const u = Number(utilPct);
+  const u = parsePercentMetric(utilPct);
+  if (u == null) return null;
   if (u >= GPU_UTIL_THRESHOLDS.criticalMin) return "critical";
   if (u >= GPU_UTIL_THRESHOLDS.warningMin) return "warning";
   return "healthy";
@@ -386,20 +431,25 @@ function mergeGpuRecord(metricGpu, inventoryGpu, linkHealthGpu) {
     pci_bus_id: pickGpuField(met.pci_bus_id, inv.pci_bus_id, lh.pci_bus_id),
     driver_version: pickGpuField(met.driver_version, inv.driver_version),
     cuda_version: pickGpuField(met.cuda_version, inv.cuda_version),
-    temperature_celsius: pickGpuField(
-      met.temperature_celsius,
-      inv.temperature_celsius,
-      lhH.temperature_celsius
+    temperature_celsius: parsePercentMetric(
+      pickGpuField(met.temperature_celsius, inv.temperature_celsius, lhH.temperature_celsius)
     ),
-    gpu_utilization_percent: pickGpuField(
-      met.gpu_utilization_percent,
-      inv.gpu_utilization_percent,
-      lhH.gpu_utilization_percent
+    gpu_utilization_percent: parsePercentMetric(
+      pickGpuField(
+        met.gpu_utilization_percent,
+        met.utilization_percent,
+        met.health?.gpu_utilization_percent,
+        inv.gpu_utilization_percent,
+        inv.health?.gpu_utilization_percent,
+        lhH.gpu_utilization_percent
+      )
     ),
-    memory_utilization_percent: pickGpuField(
-      met.memory_utilization_percent,
-      inv.memory_utilization_percent,
-      lhH.memory_utilization_percent
+    memory_utilization_percent: parsePercentMetric(
+      pickGpuField(
+        met.memory_utilization_percent,
+        inv.memory_utilization_percent,
+        lhH.memory_utilization_percent
+      )
     ),
     memory_used_mb: pickGpuField(met.memory_used_mb, inv.memory_used_mb),
     memory_free_mb: pickGpuField(met.memory_free_mb, inv.memory_free_mb),
@@ -445,7 +495,12 @@ export function normalizeGpuList(metrics, inventory, linkHealth) {
 
 export function getPrimaryGpu(metrics, inventory, linkHealth) {
   const list = normalizeGpuList(metrics, inventory, linkHealth);
-  return list[0] || null;
+  const gpu = list[0] || null;
+  if (!gpu) return null;
+  if (gpu.gpu_utilization_percent != null) return gpu;
+  const fallback = resolveGpuUtilizationPercent(gpu, metrics);
+  if (fallback == null) return gpu;
+  return { ...gpu, gpu_utilization_percent: fallback };
 }
 
 function gpuHasIdentity(gpu) {
@@ -1622,7 +1677,8 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
       );
     }
     if (gpuM.temperature_celsius != null) {
-      const gpuTempLevel = gpuTemperatureLevel(gpuM.temperature_celsius);
+      const gpuTemp = parsePercentMetric(gpuM.temperature_celsius);
+      const gpuTempLevel = gpuTemperatureLevel(gpuTemp);
       if (gpuTempLevel === "critical") {
         faults.push(
           thresholdFault({
@@ -1630,9 +1686,9 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
             severity: "Critical",
             component: "GPU",
             metricName: "Temperature",
-            currentValue: `${gpuM.temperature_celsius}°C`,
+            currentValue: `${gpuTemp}°C`,
             thresholdCrossed: `≥ ${GPU_TEMP_THRESHOLDS.criticalC}°C (Critical)`,
-            description: `GPU temperature ${gpuM.temperature_celsius}°C exceeds critical threshold.`,
+            description: `GPU temperature ${gpuTemp}°C exceeds critical threshold.`,
           })
         );
       } else if (gpuTempLevel === "warning") {
@@ -1642,50 +1698,52 @@ export function buildThresholdFaults(linkHealth, inventory, metrics) {
             severity: "Warning",
             component: "GPU",
             metricName: "Temperature",
-            currentValue: `${gpuM.temperature_celsius}°C`,
+            currentValue: `${gpuTemp}°C`,
             thresholdCrossed: `${GPU_TEMP_THRESHOLDS.warningC}–${GPU_TEMP_THRESHOLDS.criticalC - 1}°C (Warning)`,
-            description: `GPU temperature ${gpuM.temperature_celsius}°C exceeds warning threshold.`,
+            description: `GPU temperature ${gpuTemp}°C exceeds warning threshold.`,
           })
         );
       }
     }
-    if (gpuM.gpu_utilization_percent != null) {
-      if (gpuM.gpu_utilization_percent >= GPU_UTIL_THRESHOLDS.criticalMin) {
+    const gpuUtil = resolveGpuUtilizationPercent(gpuM, metrics);
+    if (gpuUtil != null) {
+      if (gpuUtil >= GPU_UTIL_THRESHOLDS.criticalMin) {
         faults.push(
           thresholdFault({
             id: "threshold-gpu-utilization",
             severity: "Critical",
             component: "GPU",
             metricName: "Utilization",
-            currentValue: `${gpuM.gpu_utilization_percent}%`,
+            currentValue: `${gpuUtil}%`,
             thresholdCrossed: gpuUtilThresholdLabel("Critical"),
-            description: `GPU utilization ${gpuM.gpu_utilization_percent}% exceeds critical threshold.`,
+            description: `GPU utilization ${gpuUtil}% exceeds critical threshold.`,
           })
         );
-      } else if (gpuM.gpu_utilization_percent >= GPU_UTIL_THRESHOLDS.warningMin) {
+      } else if (gpuUtil >= GPU_UTIL_THRESHOLDS.warningMin) {
         faults.push(
           thresholdFault({
             id: "threshold-gpu-utilization",
             severity: "Warning",
             component: "GPU",
             metricName: "Utilization",
-            currentValue: `${gpuM.gpu_utilization_percent}%`,
+            currentValue: `${gpuUtil}%`,
             thresholdCrossed: gpuUtilThresholdLabel("Warning"),
-            description: `GPU utilization ${gpuM.gpu_utilization_percent}% exceeds warning threshold.`,
+            description: `GPU utilization ${gpuUtil}% exceeds warning threshold.`,
           })
         );
       }
     }
-    if (gpuM.memory_utilization_percent != null && gpuM.memory_utilization_percent >= 90) {
+    const gpuVram = parsePercentMetric(gpuM.memory_utilization_percent);
+    if (gpuVram != null && gpuVram >= 90) {
       faults.push(
         thresholdFault({
           id: "threshold-gpu-vram",
           severity: "Warning",
           component: "GPU",
           metricName: "VRAM Usage",
-          currentValue: `${gpuM.memory_utilization_percent}%`,
+          currentValue: `${gpuVram}%`,
           thresholdCrossed: "≥ 90% (Warning)",
-          description: `GPU VRAM utilization at ${gpuM.memory_utilization_percent}%.`,
+          description: `GPU VRAM utilization at ${gpuVram}%.`,
         })
       );
     }

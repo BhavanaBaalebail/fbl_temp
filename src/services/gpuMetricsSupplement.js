@@ -16,6 +16,18 @@ function firstRegexMatch(text, patterns) {
   return null;
 }
 
+function maxProcessGpuUtil(metrics) {
+  const procs = metrics?.top_processes?.gpu;
+  if (!Array.isArray(procs) || !procs.length) return null;
+  let max = null;
+  procs.forEach((p) => {
+    const n = Number(p?.gpu_compute_percent);
+    if (!Number.isFinite(n)) return;
+    max = max == null ? n : Math.max(max, n);
+  });
+  return max;
+}
+
 const GPU_UTIL_PATTERNS = [
   /utilization\.gpu[^\d-]*(-?\d+(?:\.\d+)?)/i,
   /GPU Utilization[^\d-]*(-?\d+(?:\.\d+)?)/i,
@@ -82,9 +94,18 @@ export function enrichMetricsGpu(metrics, inventory, linkHealth, functionalBlock
 
   const parsed = parseGpuMetricsFromFunctionalBlocks(functionalBlocks);
 
+  const nestedUtil =
+    gpu.health?.gpu_utilization_percent ??
+    gpu.utilization_percent ??
+    gpu.utilization?.gpu ??
+    null;
+
   if (gpu.gpu_utilization_percent == null) {
     gpu.gpu_utilization_percent =
-      lhH.gpu_utilization_percent ?? parsed.gpu_utilization_percent ?? null;
+      lhH.gpu_utilization_percent ??
+      nestedUtil ??
+      parsed.gpu_utilization_percent ??
+      maxProcessGpuUtil(metrics);
   }
   if (gpu.temperature_celsius == null) {
     gpu.temperature_celsius =

@@ -12,6 +12,7 @@ import {
   getLatestRecovery,
   getRecoveryHistory,
   isFaultAutoRecovered,
+  RECOVERY_STATUS,
   subscribeRecoveryHistory,
 } from "../../recovery/recoveryHistoryService";
 import { analyzeRecovery } from "../../recovery/recoveryWorkflowEngine";
@@ -496,12 +497,17 @@ export function FaultModal({
 
   if (!faultForView) return null;
 
+  const latestRecovery = recoveryHistory.length
+    ? recoveryHistory[recoveryHistory.length - 1]
+    : getLatestRecovery(faultId);
   const autoRecovered = isFaultAutoRecovered(faultForView.id);
+  const latestRecStatus = latestRecovery?.recoveryStatus;
   const displayStatus = autoRecovered
     ? "Recovered"
-    : faultForView.recoveryStatus && faultForView.recoveryStatus !== "RECOVERED"
-      ? faultForView.status || "Active"
-      : faultForView.status;
+    : latestRecStatus === RECOVERY_STATUS.VERIFYING ||
+        latestRecStatus === RECOVERY_STATUS.ACTION_EXECUTING
+      ? "Verifying"
+      : faultForView.status || "Active";
   const recoverable = hasRecoveryPlaybook(faultForView);
 
   const analysis = analysisResult?.analysis;
@@ -530,9 +536,6 @@ export function FaultModal({
     return true;
   });
 
-  const latestRecovery = recoveryHistory.length
-    ? recoveryHistory[recoveryHistory.length - 1]
-    : getLatestRecovery(faultId);
   const priorityEvidence = getPriorityEvidence(faultForView, displayStatus, latestRecovery);
   const secondaryMetrics = uniqueMetrics.filter(
     ([label]) => !PRIORITY_METRIC_LABELS.has(label)
@@ -724,9 +727,9 @@ export function FaultModal({
           >
             {(slots) => (
               <>
-                <AccordionSection id="recovery" title="Recovery">
+                <AccordionSection id="recovery-actions" title="Recovery Actions">
                   <div className="space-y-3">
-                    {slots.status}
+                    {slots.actions}
                     {hasVerification ? (
                       <div className="border-t pt-3" style={{ borderColor: SURFACE.border }}>
                         <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748b]">
@@ -734,13 +737,8 @@ export function FaultModal({
                         </p>
                         <VerificationPanel faultId={faultId} fault={faultForView} embed />
                       </div>
-                    ) : (
-                      <p className="text-sm text-[#94a3b8]">No verification data available.</p>
-                    )}
+                    ) : null}
                   </div>
-                </AccordionSection>
-                <AccordionSection id="recovery-actions" title="Recovery Actions">
-                  {slots.actions}
                 </AccordionSection>
                 <AccordionSection id="recovery-confidence" title="Recovery Confidence">
                   {slots.confidence}

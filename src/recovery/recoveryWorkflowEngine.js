@@ -273,51 +273,21 @@ export async function executeApprovedRecovery(fault, recommendation, confirmatio
       afterSnapshot;
 
     append("telemetry_refreshed", "Post-action telemetry captured by backend");
-
-    let inventory;
-    let metrics;
-    let linkHealth;
-    ({ inventory, metrics, linkHealth } = await fetchLinuxTelemetry());
-
-    if (!beforeSnapshot) beforeSnapshot = snapshotMetrics(metrics, linkHealth);
-    if (!afterSnapshot) afterSnapshot = snapshotMetrics(metrics, linkHealth);
-
-    const verificationStatus = commandResult.verificationStatus;
-    const stillActive = faultStillActive(fault, inventory, metrics, linkHealth);
-    const improved = metricImproved(
-      fault,
-      commandResult.beforeMetrics || metrics,
-      metrics,
-      {},
-      linkHealth
+    append(
+      "verification_pending",
+      "Action succeeded on host. Waiting for monitoring to confirm the component is healthy."
     );
 
-    let outcome = "failed";
-    let success = false;
-    let verificationMessage;
-
-    if (verificationStatus === "success" || (!stillActive && commandResult.success)) {
-      outcome = "success";
-      success = true;
-      verificationMessage = "Fault condition cleared in live telemetry.";
-      append("verification_complete", "Recovery successful — fault cleared");
-    } else if (verificationStatus === "partial" || improved) {
-      outcome = "partial";
-      verificationMessage = "Primary metric improved but fault threshold may still be exceeded.";
-      append("verification_complete", "Partially improved");
-    } else {
-      verificationMessage =
-        commandResult.message ||
-        "Command succeeded but fault condition persists in telemetry.";
-      append("verification_complete", "Recovery failed — fault still active");
-    }
-
     const durationMs = Date.now() - startedAt;
+    const verificationMessage =
+      "Action completed on the host. Fault remains VERIFYING until live telemetry no longer reports this condition.";
     const record = recordRecoveryExecution({
       faultId: fault.id,
       component: fault.component,
       metricName: fault.metricName,
-      result: success ? "success" : outcome === "partial" ? "partial" : "failed",
+      result: "pending_verification",
+      recoveryStatus: "VERIFYING",
+      actionStatus: "ACTION_SUCCESS",
       durationMs,
       selectedAction: {
         actionId: recommendation.actionId,
@@ -325,11 +295,21 @@ export async function executeApprovedRecovery(fault, recommendation, confirmatio
         level: requiredLevel,
       },
       params: recommendation.params,
+      faultSnapshot: {
+        id: fault.id,
+        component: fault.component,
+        severity: fault.severity,
+        metricName: fault.metricName,
+        currentValue: fault.currentValue,
+        thresholdCrossed: fault.thresholdCrossed,
+        faultDescription: fault.faultDescription,
+        detected: fault.detected,
+      },
       confirmationGiven: confirmation?.confirmed ?? true,
       commandExecuted: commandResult.command || recommendation.backendAction,
       commandOutput: commandResult,
       verificationOutcome: verificationMessage,
-      verificationStatus: verificationStatus || outcome,
+      verificationStatus: "pending",
       before: beforeSnapshot,
       after: afterSnapshot,
       timeline,
@@ -338,10 +318,14 @@ export async function executeApprovedRecovery(fault, recommendation, confirmatio
     });
 
     return {
-      success,
-      partial: outcome === "partial",
+      success: false,
+      recovered: false,
+      verifying: true,
+      partial: true,
       aborted: false,
-      outcome,
+      outcome: "verifying",
+      recoveryStatus: "VERIFYING",
+      actionStatus: "ACTION_SUCCESS",
       reason: verificationMessage,
       timeline,
       before: beforeSnapshot,

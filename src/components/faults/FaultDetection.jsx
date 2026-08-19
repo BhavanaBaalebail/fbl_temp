@@ -74,6 +74,8 @@ export function FaultDetectionTab({
         totalFaults={faults.faults?.length ?? 0}
       />
 
+      <ResolvedFaultsSection rows={faults.resolvedFaults || []} />
+
       <div
         className="rounded-lg border px-4 py-2.5 text-center font-mono-metrics text-[10px] text-[#64748b]"
         style={{
@@ -262,10 +264,10 @@ function FaultLogSection({
     <HardwareModule
       icon="diagnostics"
       title="Active Fault Log"
-      subtitle={`${totalFaults} events · threshold violations auto-detected and cleared when healthy`}
+      subtitle={`${totalFaults} active events · recovered incidents move to Resolved Faults`}
       headerRight={
         <div className="flex flex-wrap gap-1.5">
-          {["Critical", "Warning", "Resolved", "All"].map((filter) => {
+          {["Critical", "Warning", "All"].map((filter) => {
             const isActive = activeFaultFilter === filter;
             return (
               <button
@@ -326,7 +328,9 @@ function FaultLogSection({
                 const rowStatus =
                   row.status === "Recovered"
                     ? "healthy"
-                    : row.status === "Active"
+                    : row.status === "Verifying"
+                      ? "warning"
+                      : row.status === "Active"
                       ? "critical"
                       : row.status === "Monitor"
                         ? "warning"
@@ -403,6 +407,102 @@ function FaultLogSection({
           </table>
         )}
       </div>
+    </HardwareModule>
+  );
+}
+
+function formatClock(value) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleString();
+}
+
+function formatDuration(detected, resolved) {
+  const a = new Date(detected).getTime();
+  const b = new Date(resolved).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return "—";
+  const sec = Math.round((b - a) / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function ResolvedFaultsSection({ rows }) {
+  const list = Array.isArray(rows) ? rows : [];
+  return (
+    <HardwareModule
+      icon="diagnostics"
+      title="Resolved Faults"
+      subtitle="Previously active incidents confirmed healthy by monitoring"
+    >
+      {list.length === 0 ? (
+        <p className="text-sm text-[#64748b]">No resolved faults yet.</p>
+      ) : (
+        <div className="space-y-2">
+          {list.map((row) => (
+            <article
+              key={`${row.id}-${row.resolvedAt}`}
+              className="rounded-lg border px-3 py-2.5"
+              style={{
+                background: "rgba(8, 12, 18, 0.55)",
+                borderColor: "rgba(34, 211, 238, 0.12)",
+              }}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-[#f1f5f9]">
+                    {row.component || "Fault"}
+                    {row.metricName ? ` · ${row.metricName}` : ""}
+                    {row.severity ? ` ${row.severity}` : ""}
+                  </p>
+                  {row.faultDescription ? (
+                    <p className="mt-0.5 line-clamp-2 text-xs text-[#94a3b8]">{row.faultDescription}</p>
+                  ) : null}
+                </div>
+                <StatusBadge status="healthy" label="RECOVERED" showDot={false} />
+              </div>
+              <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-4">
+                <div>
+                  <dt className="uppercase tracking-wider text-[#64748b]">Component</dt>
+                  <dd className="text-[#cbd5e1]">{row.component || "—"}</dd>
+                </div>
+                <div>
+                  <dt className="uppercase tracking-wider text-[#64748b]">Severity</dt>
+                  <dd className="text-[#cbd5e1]">{row.severity || "—"}</dd>
+                </div>
+                <div>
+                  <dt className="uppercase tracking-wider text-[#64748b]">Detected</dt>
+                  <dd className="font-mono-metrics text-[#cbd5e1]">{formatClock(row.detected)}</dd>
+                </div>
+                <div>
+                  <dt className="uppercase tracking-wider text-[#64748b]">Resolved</dt>
+                  <dd className="font-mono-metrics text-[#cbd5e1]">{formatClock(row.resolvedAt)}</dd>
+                </div>
+                <div>
+                  <dt className="uppercase tracking-wider text-[#64748b]">Duration</dt>
+                  <dd className="font-mono-metrics text-[#cbd5e1]">
+                    {formatDuration(row.detected, row.resolvedAt)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="uppercase tracking-wider text-[#64748b]">Recovery Action</dt>
+                  <dd className="break-words text-[#cbd5e1]">{row.recoveryAction || "—"}</dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="uppercase tracking-wider text-[#64748b]">Root Cause</dt>
+                  <dd className="break-words text-[#cbd5e1]">
+                    {Array.isArray(row.rca) ? row.rca.filter(Boolean).join(" · ") : row.rca || "—"}
+                  </dd>
+                </div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      )}
     </HardwareModule>
   );
 }

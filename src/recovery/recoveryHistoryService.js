@@ -112,3 +112,165 @@ export function subscribeRecoveryHistory(callback) {
 export function notifyRecoveryHistoryChanged() {
   window.dispatchEvent(new CustomEvent("fbl-recovery-history"));
 }
+
+const RESOLVED_KEY = "fbl_resolved_faults_v1";
+const SEEN_KEY = "fbl_seen_active_faults_v1";
+
+function loadJson(key, fallback) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveJson(key, value) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* ignore */
+  }
+}
+
+function snapshotFault(fault) {
+  if (!fault) return null;
+  return {
+    id: fault.id,
+    component: fault.component,
+    severity: fault.severity,
+    metricName: fault.metricName,
+    currentValue: fault.currentValue,
+    thresholdCrossed: fault.thresholdCrossed,
+    faultDescription: fault.faultDescription,
+    detected: fault.detected,
+    source: fault.source,
+  };
+}
+
+export function getResolvedFaults() {
+  const rows = loadJson(RESOLVED_KEY, []);
+  return [...rows].sort((a, b) =>
+    String(b.resolvedAt || "").localeCompare(String(a.resolvedAt || ""))
+  );
+}
+
+function upsertResolvedFault(entry) {
+  if (!entry?.id) return;
+  const rows = loadJson(RESOLVED_KEY, []);
+  const next = {
+    ...entry,
+    status: RECOVERY_STATUS.RECOVERED,
+    resolvedAt: entry.resolvedAt || new Date().toISOString(),
+  };
+  const idx = rows.findIndex((r) => r.id === entry.id);
+  if (idx >= 0) rows[idx] = { ...rows[idx], ...next };
+  else rows.push(next);
+  saveJson(RESOLVED_KEY, rows.slice(-200));
+}
+
+export function updateLatestRecovery(faultId, patch) {
+  if (!faultId) return null;
+  for (let i = memory.length - 1; i >= 0; i -= 1) {
+    if (memory[i].faultId === faultId) {
+      memory[i] = { ...memory[i], ...patch };
+      save(memory);
+      notifyRecoveryHistoryChanged();
+      return memory[i];
+    }
+  }
+  return null;
+}
+
+function pendingVerificationStatuses() {
+  return new Set([
+    RECOVERY_STATUS.VERIFYING,
+    RECOVERY_STATUS.ACTION_SUCCESS,
+  ]);
+}
+
+/**
+ * After a remediation action, keep VERIFYING until live monitoring no longer
+ * reports the same fault. Then mark RECOVERED and archive to Resolved Faults.
+ * Never uses a fixed timer.
+ */
+export function reconcileFaultLifecycle(liveFaults = []) {
+  const live = Array.isArray(liveFaults) ? liveFaults : [];
+  const liveIds = new Set(live.map((f) => f.id).filter(Boolean));
+  const pending = pendingVerificationStatuses();
+  let changed = false;
+
+  const latestByFault = new Map();
+  for (const rec of memory) {
+    if (rec.faultId) latestByFault.set(rec.faultId, rec);
+  }
+
+  for (const [faultId, rec] of latestByFault) {
+    const status = rec.recoveryStatus || rec.actionStatus;
+    if (!pending.has(status) && rec.result !== "pending_verification") continue;
+    if (liveIds.has(faultId)) continue;
+
+    const resolvedAt = new Date().toISOString();
+    const snap = rec.faultSnapshot || {};
+    rec.recoveryStatus = RECOVERY_STATUS.RECOVERED;
+    rec.result = "success";
+    rec.verificationOutcome =
+      "Monitoring confirmed the component returned to a healthy state.";
+    rec.resolvedAt = resolvedAt;
+    upsertResolvedFault({
+      id: faultId,
+      component: snap.component || rec.component,
+      severity: snap.severity,
+      metricName: snap.metricName || rec.metricName,
+      faultDescription: snap.faultDescription,
+      detected: snap.detected || rec.faultDetectedAt || rec.timestamp,
+      resolvedAt,
+      recoveryAction: rec.selectedAction?.label || rec.action || rec.commandExecuted,
+      rca: rec.rca || null,
+      currentValue: snap.currentValue,
+      thresholdCrossed: snap.thresholdCrossed,
+      status: RECOVERY_STATUS.RECOVERED,
+    });
+    changed = true;
+  }
+  if (changed) save(memory);
+
+  const seen = loadJson(SEEN_KEY, {});
+  for (const fault of live) {
+    if (!fault?.id || !String(fault.id).startsWith("threshold-")) continue;
+    if (fault.status === "Recovered") continue;
+    if (!seen[fault.id]) {
+      seen[fault.id] = {
+        ...snapshotFault(fault),
+        firstSeen: fault.detected || new Date().toISOString(),
+      };
+    }
+  }
+  for (const [id, snap] of Object.entries(seen)) {
+    if (liveIds.has(id)) continue;
+    const latest = latestByFault.get(id);
+    const alreadyRecovered =
+      latest?.recoveryStatus === RECOVERY_STATUS.RECOVERED ||
+      getResolvedFaults().some((r) => r.id === id);
+    if (!alreadyRecovered) {
+      const resolvedAt = new Date().toISOString();
+      upsertResolvedFault({
+        id,
+        component: snap.component,
+        severity: snap.severity,
+        metricName: snap.metricName,
+        faultDescription: snap.faultDescription,
+        detected: snap.firstSeen || snap.detected,
+        resolvedAt,
+        recoveryAction: latest?.selectedAction?.label || "Monitoring confirmed healthy",
+        currentValue: snap.currentValue,
+        thresholdCrossed: snap.thresholdCrossed,
+        status: RECOVERY_STATUS.RECOVERED,
+      });
+      changed = true;
+    }
+    delete seen[id];
+  }
+  saveJson(SEEN_KEY, seen);
+  if (changed) notifyRecoveryHistoryChanged();
+}

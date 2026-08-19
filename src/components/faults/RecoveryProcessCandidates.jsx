@@ -15,7 +15,12 @@ import {
   processActionKeysForDomain,
   processCandidatesDomainForFault,
 } from "../../recovery/recoveryProcessDomain";
-import { recordRecoveryExecution, RECOVERY_STATUS } from "../../recovery/recoveryHistoryService";
+import {
+  getLatestRecovery,
+  recordRecoveryExecution,
+  RECOVERY_STATUS,
+  subscribeRecoveryHistory,
+} from "../../recovery/recoveryHistoryService";
 import { StatusBadge } from "../ui/HardwareModule";
 import { RecoveryConfirmationDialog } from "./RecoveryConfirmationDialog";
 
@@ -136,6 +141,25 @@ export function RecoveryProcessCandidates({
     refresh();
   }, [refresh, fault?.id]);
 
+  useEffect(() => {
+    if (!fault?.id) return undefined;
+    const apply = () => {
+      const latest = getLatestRecovery(fault.id);
+      if (!latest?.recoveryStatus) return;
+      if (latest.recoveryStatus === RECOVERY_STATUS.RECOVERED) {
+        setActionStatus(RECOVERY_STATUS.RECOVERED);
+        setActionMessage(
+          latest.verificationOutcome ||
+            "Monitoring confirmed the component returned to a healthy state."
+        );
+      } else if (latest.recoveryStatus === RECOVERY_STATUS.VERIFYING) {
+        setActionStatus(RECOVERY_STATUS.VERIFYING);
+      }
+    };
+    apply();
+    return subscribeRecoveryHistory(apply);
+  }, [fault?.id]);
+
   const pauseSupported = isActionSupported(capabilities, actionKeys.pause);
   const resumeSupported = actionKeys.resume
     ? isActionSupported(capabilities, actionKeys.resume)
@@ -201,11 +225,11 @@ export function RecoveryProcessCandidates({
       }
 
       setActionStatus(
-        actionOk ? RECOVERY_STATUS.ACTION_SUCCESS : RECOVERY_STATUS.ACTION_FAILED
+        actionOk ? RECOVERY_STATUS.VERIFYING : RECOVERY_STATUS.ACTION_FAILED
       );
       setActionMessage(
         actionOk
-          ? `${detail}${result.command ? ` · ${result.command}` : ""}`
+          ? `Process action completed on host. Waiting for monitoring to confirm component health.${result.command ? ` · ${result.command}` : ""}`
           : detail
       );
 
@@ -220,23 +244,37 @@ export function RecoveryProcessCandidates({
           ? RECOVERY_STATUS.ACTION_SUCCESS
           : RECOVERY_STATUS.ACTION_FAILED,
         recoveryStatus: actionOk
-          ? RECOVERY_STATUS.ACTION_SUCCESS
+          ? RECOVERY_STATUS.VERIFYING
           : RECOVERY_STATUS.RECOVERY_FAILED,
-        result: actionOk ? "success" : "failed",
+        result: actionOk ? "pending_verification" : "failed",
         selectedAction: {
           actionId: recommendation.actionId,
           label: recommendation.label,
           level: recommendation.level,
         },
         params: recommendation.params,
+        faultSnapshot: {
+          id: fault.id,
+          component: fault.component,
+          severity: fault.severity,
+          metricName: fault.metricName,
+          currentValue: fault.currentValue,
+          thresholdCrossed: fault.thresholdCrossed,
+          faultDescription: fault.faultDescription,
+          detected: fault.detected,
+        },
         confirmationGiven: true,
         commandExecuted: result.command || recommendation.backendAction,
         commandOutput: result,
         processStateBefore: result.processStateBefore ?? null,
         processStateAfter: result.processStateAfter ?? null,
         processVerified: result.verified ?? processVerified,
-        verificationOutcome: detail,
-        reason: detail,
+        verificationOutcome: actionOk
+          ? "Process terminated (or action completed). Verifying component health against live telemetry."
+          : detail,
+        reason: actionOk
+          ? "VERIFYING — component health not yet confirmed."
+          : detail,
         timestamp: new Date().toISOString(),
       });
 

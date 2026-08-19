@@ -37,7 +37,6 @@ const tabs = ["Dashboard", "Connectivity", "Fault Detection", "Utilities", "Repo
 function Dashboard({
   metrics,
   health,
-  severity,
   stats,
   connected,
   loading,
@@ -118,7 +117,7 @@ function Dashboard({
       <BusConnector />
 
       <section className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-        <SeverityChart data={severity} />
+        <SeverityChart stats={stats} />
         <ComponentHealthStatus healthRows={health} stats={stats} />
       </section>
     </div>
@@ -210,7 +209,7 @@ function App() {
   const [dashboardFaultModal, setDashboardFaultModal] = useState(null);
   const telemetry = useTelemetry();
   const topology = useTopology(telemetry.topologyContext);
-  const faults = useFaults(telemetry.faults);
+  const faults = useFaults(telemetry.faults, { connected: telemetry.connected });
 
   const handleRecoveryComplete = () => {
     telemetry.refreshNow();
@@ -221,7 +220,6 @@ function App() {
   const dashboard = {
     metrics: telemetry.metrics,
     health: telemetry.health,
-    severity: telemetry.severity,
     stats: telemetry.stats,
     connected: telemetry.connected,
     loading: telemetry.loading,

@@ -224,7 +224,7 @@ export function ChatWidget() {
         setMessages([
           {
             role: "system",
-            text: "Hi — I can explain live health, alerts, and telemetry for this machine. Ask me anything, e.g. \"Why is Disk critical?\"",
+            text: "How can I help? I can explain live health, alerts, and telemetry for this machine.",
           },
         ]);
       }
@@ -298,7 +298,7 @@ export function ChatWidget() {
 
       <button
         onClick={toggleOpen}
-        title="Ask BAAV AI"
+        title="Ask Assistant"
         className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full transition-transform hover:scale-105"
         style={{
           background: "linear-gradient(145deg, rgba(8,145,178,0.5), rgba(34,211,238,0.25))",
@@ -328,9 +328,9 @@ export function ChatWidget() {
             style={{ background: theme.headerGradient, borderColor: "rgba(34,211,238,0.1)" }}
           >
             <div>
-              <div className="text-sm font-semibold text-[#f1f5f9]">BAAV AI</div>
+              <div className="text-sm font-semibold text-[#f1f5f9]">Assistant</div>
               <div className="text-xs text-[#64748b]">
-                live telemetry · Gemini
+                live telemetry
               </div>
             </div>
             <div className="flex gap-1">

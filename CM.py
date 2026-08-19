@@ -133,6 +133,8 @@ Then open:
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import logging
 import os
@@ -633,9 +635,24 @@ def safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 
 def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     try:
-        return float(str(value).strip().replace(",", ""))
+        s = str(value).strip().replace(",", "")
+        if s.endswith("%"):
+            s = s[:-1].strip()
+        if s.lower() in ("n/a", "[n/a]", "na", "not supported", "[not supported]", "-", ""):
+            return default
+        return float(s)
     except (TypeError, ValueError):
         return default
+
+
+def _nvidia_smi_csv_rows(output: str) -> list[list[str]]:
+    """Parse nvidia-smi CSV, including quoted GPU names that contain commas."""
+    rows = []
+    for row in csv.reader(io.StringIO(output or "")):
+        fields = [f.strip() for f in row]
+        if fields:
+            rows.append(fields)
+    return rows
 
 
 def bytes_to_kb(n: Any) -> Optional[float]:
@@ -1279,8 +1296,7 @@ def get_gpu_inventory_and_metrics() -> Optional[list[dict[str, Any]]]:
         out = run(["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"])
         if out.strip():
             gpus = []
-            for line in out.strip().splitlines():
-                fields = [f.strip() for f in line.split(",")]
+            for fields in _nvidia_smi_csv_rows(out):
                 if len(fields) < 14:
                     continue
                 (name, driver, pci_bus, mem_total, mem_used, mem_free,
@@ -3090,8 +3106,7 @@ def get_gpu_health(kernel_log: str) -> Optional[list[dict[str, Any]]]:
     replay_errors = len(re.findall(r"NVRM:.*?PCIe.*?replay", kernel_log or "", re.IGNORECASE))
 
     gpus = []
-    for idx, line in enumerate(out.strip().splitlines()):
-        fields = [f.strip() for f in line.split(",")]
+    for idx, fields in enumerate(_nvidia_smi_csv_rows(out)):
         if len(fields) < 17:
             continue
         (name, driver, pci_bus, temp, util_gpu, util_mem, power_draw, power_limit,

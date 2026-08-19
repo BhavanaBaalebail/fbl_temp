@@ -157,8 +157,8 @@ def _call_gemini(session_id: str, user_message: str, telemetry_text: str) -> str
     api_key = _get_api_key()
     if not api_key:
         return (
-            "Gemini is not configured on this agent. "
-            "Set GEMINI_API_KEY (or GOOGLE_API_KEY) in the environment before starting cm.py, "
+            "The assistant is not configured on this agent. "
+            "Set the assistant API key in the environment before starting cm.py, "
             "then restart the agent."
         )
 
@@ -201,16 +201,16 @@ def _call_gemini(session_id: str, user_message: str, telemetry_text: str) -> str
         response = model.generate_content(contents)
         reply = (getattr(response, "text", None) or "").strip()
         if not reply:
-            reply = "I received an empty response from Gemini. Please try again."
+            reply = "I received an empty response from the assistant. Please try again."
     except Exception as exc:
         logger.exception("Gemini request failed")
         err = str(exc)
         if "API_KEY" in err.upper() or "401" in err or "403" in err:
             return (
-                "Gemini rejected the API key. Check GEMINI_API_KEY on the agent host "
+                "The assistant rejected the API key. Check the assistant API key on the agent host "
                 "and restart cm.py."
             )
-        return f"Gemini request failed: {err}"
+        return f"The assistant request failed: {err}"
 
     with _sessions_lock:
         _sessions[session_id].append({"role": "user", "text": user_message})
